@@ -13,6 +13,8 @@
 #define GP5_LINK_EARLY   /* the exchange starts at the start of each block (platform/dsp/audio.h) */
 #endif
 #define GP5_LINK_WORDS 264u
+#define GP5_SAMPLE_RATE 48000u   /* NAM captures are trained at 48 kHz: run them at their own rate (platform 0.5.6) */
+#define NAM_DSP_SLOW (191900000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)   /* 95 % of a block, core cycles */
 
 #include "../split.h"
 #include "../kernel/a2r.c"
@@ -97,7 +99,7 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
     }
     cyc = *(volatile uint32_t *)0xE0001004u - t0;
     if (cyc > worst && blk > 100u) worst = cyc;
-    if (cyc > 264000u) slow++;                                 /* over 95 %: at 50 the model stops (dry/silent) */
+    if (cyc > NAM_DSP_SLOW) slow++;                                 /* over 95 %: at 50 the model stops (dry/silent) */
     lo[LW_DSPCYC] = (int32_t)cyc;
     {   /* the control processor's gain (fades when switching captures), ramped over the block */
         int32_t g1 = have ? li[LW_GAIN] : 0, g0 = g_prev;

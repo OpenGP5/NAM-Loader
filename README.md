@@ -1,7 +1,7 @@
 # NAM Loader
 
 **A capture player firmware for the Valeton GP-5, built on [OpenGP5](https://github.com/OpenGP5/OpenGP5).**
-Version 1.0.0, on OpenGP5 0.5.5-alpha.
+Version 1.0.0, on OpenGP5 0.5.6-alpha.
 
 It plays [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) A2 captures (their A2-Lite
 part) on the pedal itself. The model is split across both of the pedal's processors: the control processor runs
@@ -58,7 +58,7 @@ the installed firmware). Back that up first, for example with Launchpad.
 | `dsp/firmware.h` | the DSP's layers, the output and the bypass |
 | `default_capture.inc` | the built-in capture (see `CAPTURE-LICENSE.txt`) |
 | `tools/a2r_export.py` | converts a `.nam` file into a capture file (`.a2r`) or a built-in one (`.inc`); needs numpy and soundfile |
-| `opengp5/` | the platform, a git submodule pinned to a tested release (0.5.5-alpha) |
+| `opengp5/` | the platform, a git submodule pinned to a tested release (0.5.6-alpha) |
 
 To rebuild the built-in capture:
 

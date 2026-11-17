@@ -38,6 +38,7 @@ static char slot_name[NAM_SLOTS][25];
 static uint32_t in_peak;                /* largest input sample since the screen last asked */
 
 volatile uint32_t nam_lstm_cycles, nam_bypass, nam_blocks, nam_lost, nam_dsp_cycles, nam_cycles, nam_worst;
+#define NAM_CTL_SLOW (288000000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)    /* 95 % of a block at 288 MHz */
 volatile uint32_t nam_a2_worst, nam_bind, nam_slow;   /* nam_slow: blocks over 95 %; at 50 the model stops */
 
 /* Slot i's capture file (platform 0.4: the file "tone-NN" of NAM_FIRM, written by OpenGP5 Launchpad), or, until
@@ -117,7 +118,7 @@ static void on_block(const int32_t *in, int32_t *out)
     a2r_run(&a2, in + LW_U, 0, out + LW_X, out + LW_Y, 0);
     t = __nds32__mfsr(NDS32_SR_PFMC0) - t0;
     nam_lstm_cycles = t;
-    if (t > 397000u) nam_slow++;                       /* too slow: keep USB and the screen alive, stop the model */
+    if (t > NAM_CTL_SLOW) nam_slow++;                       /* too slow: keep USB and the screen alive, stop the model */
     if (nam_blocks > 100 && t > nam_a2_worst) nam_a2_worst = t;
     out[LW_RTAG] = in[LW_TAG];
     out[LW_FLAGS] = (int32_t)((nam_bypass & 1u) | 2u);
