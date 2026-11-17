@@ -1,22 +1,27 @@
 /* NAM A2-Lite on both processors, DSP part (see ../split.h for the split and the link words).
- * The DSP sends the guitar input to the control processor at the start of each block (GP5_LINK_EARLY), which runs
- * layers 0..A2_SPLIT-1 and sends back the residual stream and its share of the output; the DSP runs the remaining
- * layers on that, adds the shares, and plays the result. Latency: the control processor's answer to block n
- * arrives a few blocks later (the tag says which input block it belongs to).
- * Its layers start from silence (no prime): the first ~50 ms after start-up are not exact.
+ * Each block the DSP runs layers 0..A2_SPLIT-1 on the guitar input and sends the input, the residual stream and its
+ * share of the output to the control processor (in the exchange at the start of the next block). The control
+ * processor runs the rest, adds the shares, applies the cab IR and sends the finished block back; the DSP plays it
+ * (ramped by the control processor's gain) or, in bypass, the dry input. Latency: about three blocks (4 ms at
+ * 48 kHz) plus the converters.
+ * Its layers start from silence (no prime): their receptive field is 138 samples, inside the fade-in.
  * The capture comes from the control processor over the link (split.h); the DSP holds no model of its own.
  * gp5_link.py raw 307f0400 -> [model cycles last][worst][sequence errors][slow blocks | bind error << 16][dup tags]
  *                                [old tags][capture checksum held][capture pieces received][bad captures]
- *                  raw 317f0400 -> link check (blocks without the control processor's words, repeats, skips, ...) */
+ *                  raw 317f0400 -> link check (blocks without the control processor's words, repeats, skips, ...)
+ *                  raw 327f0400 -> the control processor's cycles: [last][worst][per block] */
 #define GP5_AUDIO_LINK
 #ifndef GP5_LINK_EARLY   /* build.py passes it too */
 #define GP5_LINK_EARLY   /* the exchange starts at the start of each block (platform/dsp/audio.h) */
 #endif
 #define GP5_LINK_WORDS 264u
+// #define GP5_CTL_FMA        /* the control processor's files with fused multiply-adds (the cab IR) */
+#define GP5_CTL_MHZ 320u   /* the control processor at stock's 320 MHz, core at 1.25 V (platform 0.6): room for the cab IR */
 #define GP5_SAMPLE_RATE 48000u   /* NAM captures are trained at 48 kHz: run them at their own rate (platform 0.5.6) */
 #define NAM_DSP_SLOW (191900000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)   /* 95 % of a block, core cycles */
 
 #include "../split.h"
+#include "../pack24.h"
 #include "../kernel/a2r.c"
 #include "../kernel/a2r_blob.c"
 
@@ -24,12 +29,12 @@ static a2r_state_t a2 GP5_LARGE;
 static a2r_capture_t cap GP5_LARGE;
 static uint32_t cfile[2048] GP5_LARGE;           /* the capture file as received (8 KB at most) */
 static uint32_t have_crc, rx_crc, rx_next, rx_total, rx_pieces, rx_bad;
-static int32_t a2_mem[10240] GP5_LARGE;          /* histories of layers A2_SPLIT..22 (36,168 bytes for A2-Lite) */
-static int32_t uhist[8][GP5_BLOCK] GP5_LARGE;    /* the last 8 input blocks, by tag */
-static int32_t ymine[GP5_BLOCK];
+static int32_t a2_mem[6144] GP5_LARGE;           /* histories of layers 0..A2_SPLIT-1 (19,500 bytes for A2-Lite) */
 static uint32_t blk, tag_last, bind_err;
 static int32_t g_prev;                           /* output gain at the end of the last block, Q16 */
 static uint32_t cyc, worst, seq_bad, seq_last, slow, d_tagdup, d_tagold;
+static uint32_t ctl_cyc, ctl_worst;              /* the control processor's cycles (LW_CTLCYC), for 0x7F32 */
+static uint32_t cabw[5];                          /* the cab IR's cycles and state (LW_CAB), for 0x7F33 */
 static uint32_t d_notok, d_dup, d_skip, d_since, d_gi, d_gap[8];
 
 static void fw_init(void)
@@ -38,6 +43,7 @@ static void fw_init(void)
     cyc = worst = seq_bad = seq_last = slow = d_tagdup = d_tagold = 0;
     d_notok = d_dup = d_skip = d_since = d_gi = 0;
     g_prev = 0; bind_err = 0; have_crc = rx_crc = rx_next = rx_total = rx_pieces = rx_bad = 0;
+    ctl_cyc = ctl_worst = 0;
 }
 
 /* a piece of the capture file from the control processor; when the last one is in: check it, bind the layers */
@@ -52,26 +58,18 @@ static void take_piece(const int32_t *li)
     if (rx_next < rx_total) return;
     rx_crc = 0;
     if (a2r_capture_parse(&cap, cfile, rx_total * 4u) || cap.crc != crc) { rx_bad++; return; }
-    bind_err = (uint32_t)-a2r_bind_range(&a2, &cap.m, A2_SPLIT, cap.m.nl, a2_mem, sizeof a2_mem);
+    bind_err = (uint32_t)-a2r_bind_range(&a2, &cap.m, 0, A2_SPLIT, a2_mem, sizeof a2_mem);
     have_crc = bind_err ? 0 : crc;
-    slow = 0; worst = 0;
+    slow = 0; worst = 0; ctl_worst = 0;
 }
 
-/* The new input goes to the control processor at once, in the exchange starting now; kept here by its tag. */
-static void fw_link_early(const int32_t *in, int32_t *lo)
-{
-    uint32_t i;
-    blk++;
-    for (i = 0; i < GP5_BLOCK; i++) { lo[LW_U + i] = in[i]; uhist[blk & 7u][i] = in[i]; }
-    lo[LW_TAG] = (int32_t)blk;
-    lo[LW_DSPCRC] = (int32_t)have_crc;
-    lo[0] = (int32_t)MAGIC_D;
-}
+/* Nothing is ready at the start of a block: everything for the control processor comes out of fw_process(). */
+static void fw_link_early(const int32_t *in, int32_t *lo) { (void)in; (void)lo; blk++; }
 
 static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
 {
     const int32_t *li = gp5_link_in();
-    int32_t *lo = gp5_link_out();
+    int32_t *lo = gp5_link_out();                  /* goes out at the start of the next block */
     int ok = (uint32_t)li[0] == MAGIC_N;
     if ((uint32_t)li[0] == MAGIC_W) take_piece(li);
     uint32_t flags = ok ? (uint32_t)li[LW_FLAGS] : 0, i, t0 = *(volatile uint32_t *)0xE0001004u;   /* cycle counter */
@@ -81,27 +79,47 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
         if (!ok) d_notok++;
         else {
             uint32_t q = (uint32_t)li[LW_SEQ];
+            ctl_cyc = (uint32_t)li[LW_CTLCYC];
+            for (i = 0; i < 5; i++) cabw[i] = (uint32_t)li[LW_CAB + i];
+            if (blk > 100u && ctl_cyc > ctl_worst && ctl_cyc < 10000000u) ctl_worst = ctl_cyc;
             if (q != seq_last + 1u) { seq_bad++; bad = 1; if (q == seq_last) d_dup++; else d_skip++; }
             seq_last = q;
         }
         d_since++;
         if (bad) { d_gap[d_gi++ & 7u] = d_since; d_since = 0; }
     }
-    if (ok && (flags & 2u) && have_crc && (uint32_t)li[LW_CAPCRC] == have_crc && slow < 50u) {
+    /* the control processor's finished block (for an input a few blocks back) */
+    if (ok && (flags & 2u) && have_crc && (uint32_t)li[LW_CAPCRC] == have_crc) {
         uint32_t tag = (uint32_t)li[LW_RTAG];
-        if (tag == tag_last) d_tagdup++;                       /* the same answer again: do not run it twice */
-        else if (blk - tag >= 8u) d_tagold++;                  /* its input is gone already */
-        else {
-            a2r_run(&a2, uhist[tag & 7u], &li[LW_X], 0, ymine, 1);
-            have = 1;
-        }
+        if (tag == tag_last) d_tagdup++;                       /* the same block again: play nothing new */
+        else if (blk - tag >= 8u) d_tagold++;
+        else have = 1;
         tag_last = tag;
     }
+    /* this block's input through layers 0..A2_SPLIT-1, for the control processor, packed (pack24.h) */
+    {
+        static int32_t xs[GP5_BLOCK * 3], ys[GP5_BLOCK];
+        unsigned su = p24_shift(in, GP5_BLOCK, 0, 1), sx[3] = { 0, 0, 0 }, sy = 0;
+        p24_pack(in, GP5_BLOCK, &su, 1, &lo[LW_U]);
+        lo[LW_DVALID] = 0;
+        if (have_crc && slow < 50u) {
+            a2r_run(&a2, in, 0, xs, ys, 0);
+            for (i = 0; i < 3; i++) sx[i] = p24_shift(xs, GP5_BLOCK * 3, (int)i, 3);
+            sy = p24_shift(ys, GP5_BLOCK, 0, 1);
+            p24_pack(xs, GP5_BLOCK * 3, sx, 3, &lo[LW_X]);
+            p24_pack(ys, GP5_BLOCK, &sy, 1, &lo[LW_YD]);
+            lo[LW_DVALID] = 1;
+        }
+        lo[LW_SHIFTS] = (int32_t)(su | sx[0] << 4 | sx[1] << 8 | sx[2] << 12 | sy << 16);
+    }
+    lo[LW_TAG] = (int32_t)blk;
+    lo[LW_DSPCRC] = (int32_t)have_crc;
+    lo[0] = (int32_t)MAGIC_D;
     cyc = *(volatile uint32_t *)0xE0001004u - t0;
     if (cyc > worst && blk > 100u) worst = cyc;
-    if (cyc > NAM_DSP_SLOW) slow++;                                 /* over 95 %: at 50 the model stops (dry/silent) */
+    if (cyc > NAM_DSP_SLOW) slow++;                            /* over 95 %: at 50 its layers stop (silent) */
     lo[LW_DSPCYC] = (int32_t)cyc;
-    {   /* the control processor's gain (fades when switching captures), ramped over the block */
+    {   /* play: the control processor's gain (fades when switching captures), ramped over the block */
         int32_t g1 = have ? li[LW_GAIN] : 0, g0 = g_prev;
         if (g1 < 0) g1 = 0;
         if (g1 > 65536) g1 = 65536;
@@ -109,10 +127,10 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
             int32_t v = 0;
             if (flags & 1u) v = in[i];
             else if (have) {
-                int64_t s = (int64_t)ymine[i] + li[LW_Y + i];
+                int64_t s = li[LW_Y + i];
                 int32_t g = g0 + (int32_t)(((g1 - g0) * (int32_t)(i + 1)) / (int32_t)GP5_BLOCK);
                 if (g < 65536) s = (s * g) >> 16;
-                v = s > 2147483647LL ? 2147483647 : s < -2147483648LL ? (int32_t)0x80000000 : (int32_t)s;
+                v = (int32_t)s;
             }
             out_left[i] = v; out_right[i] = v;
         }
@@ -128,6 +146,20 @@ static int fw_command(uint32_t cmd, const uint8_t *payload, uint32_t n)
         uint32_t v[9] = { cyc, worst, seq_bad, slow | (bind_err << 16), d_tagdup, d_tagold, have_crc, rx_pieces, rx_bad }, k;
         uint8_t r[40] = { 0x30, 0x7F, 40, 0 };
         for (k = 0; k < 36; k++) r[4 + k] = (uint8_t)(v[k / 4] >> (8 * (k % 4)));
+        gp5_reply(r, sizeof r);
+        return 1;
+    }
+    if (cmd == 0x7F32) {   /* the control processor's load: [cmd][len 16][cycles last][worst][cycles per block] */
+        uint32_t v[3] = { ctl_cyc, ctl_worst, GP5_CTL_MHZ * 1000000u / GP5_SAMPLE_RATE * 64u }, k;
+        uint8_t r[16] = { 0x32, 0x7F, 16, 0 };
+        for (k = 0; k < 12; k++) r[4 + k] = (uint8_t)(v[k / 4] >> (8 * (k % 4)));
+        gp5_reply(r, sizeof r);
+        return 1;
+    }
+    if (cmd == 0x7F33) {   /* the cab IR: [cmd][len 24][cycles][forward FFT][products][inverse FFT][taps | on << 16 | auto-off << 17] */
+        uint8_t r[24] = { 0x33, 0x7F, 24, 0 };
+        uint32_t k;
+        for (k = 0; k < 20; k++) r[4 + k] = (uint8_t)(cabw[k / 4] >> (8 * (k % 4)));
         gp5_reply(r, sizeof r);
         return 1;
     }

@@ -1,12 +1,16 @@
 # NAM Loader
 
 **A capture player firmware for the Valeton GP-5, built on [OpenGP5](https://github.com/OpenGP5/OpenGP5).**
-Version 1.0.0, on OpenGP5 0.5.6-alpha.
+Version 1.1.0, on OpenGP5 0.6.0-alpha.
 
 It plays [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) A2 captures (their A2-Lite
-part) on the pedal itself. The model is split across both of the pedal's processors: the control processor runs
-the first layers, the DSP the rest and the output. You keep up to 12 captures on the pedal and switch between
-them with the PARA knob.
+part) on the pedal itself, at 48 kHz, the rate captures are trained at. The model is split across both of the
+pedal's processors: the DSP runs the first layers, the control processor (at 320 MHz) the rest, the output and a
+cab impulse response. You keep up to 12 captures on the pedal, each with its own cab IR if you like, and switch
+between them with the PARA knob.
+
+New in 1.1.0: a cab IR per slot (1,024 taps, 21 ms), 48 kHz, captures driven as hard as they were recorded
+(input calibration) and every capture equally loud (output levelling).
 
 > **Alpha.** Flashing custom firmware can go wrong. Read OpenGP5's
 > [getting-started guide](https://github.com/OpenGP5/OpenGP5/blob/main/GETTING-STARTED.md), especially
@@ -26,9 +30,19 @@ volume. The slot playing is remembered across power-off.
 
 ## Getting captures onto the pedal
 
-Use [OpenGP5 Launchpad](https://github.com/OpenGP5/Launchpad): its Tones page takes a `.nam` file (A2), converts
-its A2-Lite part and writes it into a slot. A1 (older) captures can't be played. With the bank empty, the
-pedal plays its built-in capture, "NAM A2 demo".
+Use [OpenGP5 Launchpad](https://github.com/OpenGP5/Launchpad) 0.1.1 or later: its Tones page takes a `.nam` file
+(A2), converts its A2-Lite part and writes it into a slot. A1 (older) captures can't be played. With the bank
+empty, the pedal plays its built-in capture, "NAM A2 demo".
+
+- **Input calibration.** The pedal's input is +7.1 dBu at full scale (measured). A capture that says what level
+  it was recorded at (`input_level_dbu` in its metadata) gets the difference as input gain, so it is driven as
+  hard as the gear was. Captures without it play as they are.
+- **Output levelling.** The converter plays plucked chords through the capture at the level of hard playing,
+  measures its loudness (K-weighted) and sets it to -20 dB, its peaks at most -3 dBFS. Across 48 captures the
+  loudness had spread over 32 dB. Launchpad has a switch for each of these two.
+- **Cab IRs.** Drop a `.wav` impulse response on a slot in the Tones page. The first 1,024 samples at 48 kHz are
+  used (any rate and length is resampled and cut), set to the same loudness as every other IR. For captures of an
+  amp without a cab (DI); the IR switches itself off if the processor ever runs short of time.
 
 ## Build and flash
 
@@ -53,12 +67,15 @@ the installed firmware). Back that up first, for example with Launchpad.
 | `kernel/a2r.c`, `a2r.h` | the A2-Lite network in fixed point with a 32-bit residual stream; builds for the control processor (NDS32 DSP extension), the DSP (Cortex-M4) and the computer |
 | `kernel/a2r_blob.c`, `a2r_blob.h` | the capture file format: the quantized weights, their scales and the name |
 | `split.h` | where the model is split, the slot bank, and the audio link's words; shared by both sides |
-| `nds32/a2.c` | the control processor's layers, run in the audio link's interrupt; the slot bank and switching (fade out, load, fade in) |
-| `nds32/firmware.c` | the controls and the yellow 160 x 80 screen |
-| `dsp/firmware.h` | the DSP's layers, the output and the bypass |
+| `pack24.h` | the DSP's results packed as 24-bit block floating point, so they fit the audio link at 48 kHz |
+| `nds32/a2.c` | the control processor's layers, the output and the cab IR, run in the audio link's interrupt; the slot bank and switching (fade out, load, fade in) |
+| `nds32/firmware.c` | the controls, the yellow 160 x 80 screen and the live settings (USB `7E 10`: 0 = cab IR on / off, 1 = at most N taps) |
+| `dsp/firmware.h` | the DSP's layers, the bypass and the dry signal |
+| `cab/cabq.h` | the cab IR: a fixed-point partitioned FFT convolver (64-sample blocks, the control processor's integer DSP instructions; its float unit is too slow for it) |
 | `default_capture.inc` | the built-in capture (see `CAPTURE-LICENSE.txt`) |
-| `tools/a2r_export.py` | converts a `.nam` file into a capture file (`.a2r`) or a built-in one (`.inc`); needs numpy and soundfile |
-| `opengp5/` | the platform, a git submodule pinned to a tested release (0.5.6-alpha) |
+| `tools/a2r_export.py` | converts a `.nam` file into a capture file (`.a2r`) or a built-in one (`.inc`), with input calibration and output levelling (`--no-calibration`, `--no-level`); needs numpy and soundfile |
+| `tools/make_cab.py` | converts a `.wav` IR into a cab file, as Launchpad does; needs numpy, soundfile and scipy |
+| `opengp5/` | the platform, a git submodule pinned to a tested release (0.6.0-alpha) |
 
 To rebuild the built-in capture:
 

@@ -37,7 +37,17 @@ static inline int32_t KMT(int32_t acc, int32_t a, uint32_t b) { return sat32((in
 static inline int32_t SMMWB(int32_t a, uint32_t b) { return (int32_t)(((int64_t)a * (int16_t)b) >> 16); }
 static inline int32_t KMM(int32_t acc, int32_t a, int32_t b) { return sat32((int64_t)acc + (((int64_t)a * b + 0x80000000LL) >> 32)); }
 #endif
-static void wcopy(int32_t *d, const int32_t *s, int n) { while (n-- > 0) *d++ = *s++; }   /* d <= s if overlapping */
+static void wcopy(int32_t *d, const int32_t *s, int n)       /* d <= s if overlapping (forward) */
+{
+#if defined(__NDS32_EXT_DSP__)
+    /* 8 words per load-multiple / store-multiple (the history rewinds copy up to ~3,600 words; 2 instructions a word
+     * before: 2.2..8.9 % of a block went to them). Checked in the simulator: kernel/test/lmw_test.c */
+    for (; n >= 8; n -= 8)
+        __asm__ volatile("lmw.bim $r16, [%1], $r23, 0x0\n\tsmw.bim $r16, [%0], $r23, 0x0"
+                         : "+r"(d), "+r"(s) : : "$r16", "$r17", "$r18", "$r19", "$r20", "$r21", "$r22", "$r23", "memory");
+#endif
+    while (n-- > 0) *d++ = *s++;
+}
 static void wzero(int32_t *d, int n) { while (n-- > 0) *d++ = 0; }
 #define PACK(lo, hi) ((uint32_t)(uint16_t)(lo) | ((uint32_t)(uint16_t)(hi) << 16))
 
@@ -93,11 +103,19 @@ int a2r_bind(a2r_state_t *s, const a2r_model_t *m, void *mem, int bytes) { retur
 
 void a2r_reset(a2r_state_t *s)
 {
-    for (int l = s->l0; l < s->l1; l++) {
-        wzero(s->L[l].ring, s->L[l].len * C);
-        /* the history before pos is silence; starting the layers at different points staggers their rewinds
-         * (one every 4th block each) over the blocks instead of all in the same one */
-        s->L[l].pos = (s->L[l].K - 1) * s->L[l].D + (l % 4) * B;
+    /* The history before pos is silence. Each layer rewinds (copies its history back to the start) every 4th block;
+     * its starting point sets in which of the 4 blocks. The biggest go first, each into the block with the least
+     * copying so far, so no block copies two big histories at once (2026-11-16: 2.2..8.9 % of a block before). */
+    int load[4] = { 0, 0, 0, 0 }, done[A2R_MAX_LAYERS] = { 0 };
+    for (int n = s->l0; n < s->l1; n++) {
+        int best = -1, phase = 0;
+        for (int l = s->l0; l < s->l1; l++)
+            if (!done[l] && (best < 0 || (s->L[l].K - 1) * s->L[l].D > (s->L[best].K - 1) * s->L[best].D)) best = l;
+        for (int q = 1; q < 4; q++) if (load[q] < load[phase]) phase = q;
+        done[best] = 1;
+        load[phase] += (s->L[best].K - 1) * s->L[best].D;
+        wzero(s->L[best].ring, s->L[best].len * C);
+        s->L[best].pos = (s->L[best].K - 1) * s->L[best].D + phase * B;
     }
     wzero(s->hbuf, (int)(sizeof s->hbuf / 4));
 }
@@ -137,7 +155,7 @@ static void post32(const int32_t *z, const a2r_layer_rt_t *L, uint32_t slope, co
     const int32_t lb0 = L->l1b[0], lb1 = L->l1b[1], lb2 = L->l1b[2];
     for (int t = 0; t < B; t++, z += C, x += C, head += C) {
         int32_t a0 = z[0], a1 = z[1], a2 = z[2];
-        if (a0 < 0) a0 = SMMWB(a0, slope);
+        if (a0 < 0) a0 = SMMWB(a0, slope);                     /* (branchless was slower on the pedal: +2 % of a block) */
         if (a1 < 0) a1 = SMMWB(a1, slope);
         if (a2 < 0) a2 = SMMWB(a2, slope);
         head[0] += (a0 + hh) >> sh_head; head[1] += (a1 + hh) >> sh_head; head[2] += (a2 + hh) >> sh_head;
@@ -152,6 +170,12 @@ static void post32(const int32_t *z, const a2r_layer_rt_t *L, uint32_t slope, co
 }
 
 static int32_t g_z[B * C];                   /* static: this runs in an interrupt */
+#ifdef A2R_PROF                              /* cycles per stage of the last a2r_run: history, conv, post, output */
+volatile uint32_t a2r_prof[4];
+#define PT(i, t) do { uint32_t n_ = A2R_PROF(); a2r_prof[i] += n_ - (t); (t) = n_; } while (0)
+#else
+#define PT(i, t) ((void)0)
+#endif
 
 static int32_t *room(a2r_layer_rt_t *L)      /* this layer's history: make room for a block, return its rows */
 {
@@ -171,6 +195,10 @@ void a2r_run(a2r_state_t *s, const int32_t *u, const int32_t *xin, int32_t *xout
     const a2r_model_t *m = s->m;
     const int kh = m->kh, nl = m->nl, l0 = s->l0, l1 = s->l1;
     int32_t *head = &s->hbuf[(kh - 1) * C];
+#ifdef A2R_PROF
+    uint32_t pt = A2R_PROF();
+    a2r_prof[0] = a2r_prof[1] = a2r_prof[2] = a2r_prof[3] = 0;
+#endif
     wzero(head, B * C);
     int32_t *x = room(&s->L[l0]);
     if (xin) wcopy(x, xin, B * C);
@@ -181,8 +209,11 @@ void a2r_run(a2r_state_t *s, const int32_t *u, const int32_t *xin, int32_t *xout
     for (int l = l0; l < l1; l++) {
         a2r_layer_rt_t *L = &s->L[l];
         int32_t *xo = l + 1 < l1 ? room(&s->L[l + 1]) : l + 1 < nl ? xout : 0;
+        PT(0, pt);
         conv32(x - C * (L->K - 1) * L->D, L->wpk, L, u, g_z, L->K, L->D);
+        PT(1, pt);
         post32(g_z, L, (uint32_t)m->slope_q16, x, xo, head);
+        PT(2, pt);
         L->pos += B;
         x = xo;
     }
@@ -193,10 +224,12 @@ void a2r_run(a2r_state_t *s, const int32_t *u, const int32_t *xin, int32_t *xout
         int64_t y = 0;
         for (int j = 0; j < kh; j++)
             y += (int64_t)hw[j] * h[j * C] + (int64_t)hw[kh + j] * h[j * C + 1] + (int64_t)hw[2 * kh + j] * h[j * C + 2];
-        float v = (float)y * s->out_k + ob;
+        /* int64 -> float in two hardware conversions (the library's int64 one is slow): |y| < 2^52 */
+        float v = ((float)(int32_t)(y >> 21) * 2097152.0f + (float)(int32_t)(y & 0x1FFFFF)) * s->out_k + ob;
         out[t] = v >= 2147483520.0f ? 2147483647 : v <= -2147483648.0f ? (int32_t)0x80000000 : (int32_t)v;
     }
     wcopy(s->hbuf, &s->hbuf[B * C], (kh - 1) * C);
+    PT(3, pt);
 }
 
 void a2r_process(a2r_state_t *s, const int32_t *in, int32_t *out) { a2r_run(s, in, 0, 0, out, 1); }

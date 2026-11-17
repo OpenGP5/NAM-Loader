@@ -13,4 +13,9 @@ const char *nam_name(void);            /* the capture playing */
 int nam_busy(void);                    /* switching */
 unsigned nam_progress(void);           /* 0..255 through a switch */
 unsigned nam_take_peak(void);          /* the largest input sample since the last call, 0..2^31 */
+void nam_cab(int on);                  /* the cab IR on / off (live setting 0) */
+int nam_cab_is_on(void);
+void nam_cab_limit(unsigned taps);     /* at most this many taps of the IR file, 0 = all (live setting 1) */
+unsigned nam_cab_get_limit(void);
+unsigned nam_cab_len(void);            /* taps in use, 0 = no IR file */
 #endif

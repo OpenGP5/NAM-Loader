@@ -59,7 +59,20 @@ void fw_init(void)
 }
 void fw_foot(void) { nam_bypass ^= 1u; }
 const char *fw_name(void) { return "nam"; }
-int fw_store_changed(uint32_t id) { return id == STORE_ID; }   /* tone files: picked up by nam_poll within ~0.1 s */
+int fw_store_changed(uint32_t id) { return id == STORE_ID; }
+/* live settings (USB 7E 10 / 7E 11): 0 cab IR on (1) / off (0), 1 the IR's taps at most (0 = the whole file) */
+int fw_param_set(uint32_t id, uint32_t value)
+{
+    if (id == 0) { nam_cab(value != 0); return 1; }
+    if (id == 1 && value <= 1024u) { nam_cab_limit(value); return 1; }
+    return 0;
+}
+int fw_param_get(uint32_t id, uint32_t *value)
+{
+    if (id == 0) { *value = (uint32_t)nam_cab_is_on(); return 1; }
+    if (id == 1) { *value = nam_cab_get_limit(); return 1; }
+    return 0;
+}   /* tone files: picked up by nam_poll within ~0.1 s */
 void fw_para_push(void)
 {
     if (!browsing) { browsing = 1; cursor = nam_current() < 0 ? 0 : nam_current(); browse_until = ticks + BROWSE_TICKS; return; }

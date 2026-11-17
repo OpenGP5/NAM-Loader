@@ -1,31 +1,39 @@
-/* NAM A2-Lite on both processors, control-processor part: layers 0..A2_SPLIT-1 of the model on the
- * DSP's input, in the audio link's interrupt; the residual stream and this side's share of the output go back to
- * the DSP, which runs the rest (../split.h).
+/* NAM A2-Lite on both processors, control-processor part: layers A2_SPLIT..end of the model, the output and the cab
+ * IR, in the audio link's interrupt. The DSP sends each input block with its layers' residual stream and share of
+ * the output; the finished block goes back to the DSP, which plays it (../split.h).
  *
- * Captures come from a bank of NAM_SLOTS slots in the data area (../split.h: slot i at i * NAM_SLOT_BYTES; written
- * from the computer with OpenGP5 Launchpad), or the built-in default when the bank is empty.
- * Switching: the output fades out (NAM_FADE_OUT blocks), the main loop loads the new capture (parse, bind, prime
- * this side's layers), the DSP gets its copy over the link, and the output fades in (NAM_FADE_IN blocks: this
- * also covers the DSP's layers starting from silence). A capture written into a slot while this runs is picked
- * up within a moment and played (the upload writes its header last, so a half-written one is never seen). */
+ * Captures come from a bank of NAM_SLOTS storage files "tone-NN" (written by OpenGP5 Launchpad), or the built-in
+ * default when the bank is empty. Switching: the output fades out (NAM_FADE_OUT blocks), the main loop loads the new
+ * capture (parse, bind, prime this side's layers from the silent state of the DSP's), the DSP gets its copy over the
+ * link, and the output fades in (NAM_FADE_IN blocks: this also covers the DSP's layers starting from silence). A
+ * capture written into a slot while this runs is picked up within a moment and played.
+ *
+ * Cab IR, one per tone: the storage file "cab-NN" goes with tone slot NN, "cab" with the built-in capture (format
+ * below; OpenGP5 Launchpad writes them). Played while the cab is on (live setting 0, USB 7E 10; on by default).
+ * Read when a capture is loaded and re-read when the file changes. */
 #pragma GCC optimize("O2")
 #include <stdint.h>
 #include <nds32_intrinsic.h>
 #include "../kernel/a2r.c"
 #include "../kernel/a2r_blob.c"
+#define CABQ_MAX_TAPS 1024
+#define CABQ_CYCLES() __nds32__mfsr(NDS32_SR_PFMC0)
+#include "../cab/cabq.h"     /* fixed point: this FPU is too slow for it */
 #include "../default_capture.inc"
 #include "../split.h"
+#include "../pack24.h"
 #include "gp5_firmware.h"
 #include "nam.h"
 
-#define NAM_FADE_OUT 8u          /* blocks (1.45 ms each) */
+#define NAM_FADE_OUT 8u          /* blocks (1.33 ms each at 48 kHz) */
 #define NAM_FADE_IN 40u
 #define UNITY 65536
 
 enum { ST_PLAY, ST_FADE, ST_LOAD, ST_SEND };
 
-static a2r_state_t a2;
-static int32_t a2_mem[32000];           /* histories of layers 0..A2_SPLIT-1 */
+static a2r_state_t a2, a2pre;
+static int32_t a2_mem[34000];           /* histories of layers A2_SPLIT..end (132,660 bytes for A2-Lite) */
+static int32_t pre_mem[5120];           /* layers 0..A2_SPLIT-1, only to prime ours (19,500 bytes) */
 static a2r_capture_t cap, probe;
 static const uint32_t *cap_file;        /* the capture file being played: a slot or the built-in one */
 static volatile uint32_t st, gain;      /* gain: Q16, sent to the DSP with every block */
@@ -36,13 +44,24 @@ static uint32_t slot_crc[NAM_SLOTS], slot_bad[NAM_SLOTS];
 static uint8_t slot_ok[NAM_SLOTS];
 static char slot_name[NAM_SLOTS][25];
 static uint32_t in_peak;                /* largest input sample since the screen last asked */
+static int32_t ymine[A2R_BLOCK];
+
+/* the cab IR */
+static cabq_t cab;
+static volatile uint32_t cab_on = 1u, cab_ready;   /* ready: cab holds the file's IR (the interrupt may use it) */
+static volatile uint32_t cab_auto_off;             /* the IR pushed a block over the limit: switched off (until set again) */
+static uint32_t cab_limit;                         /* live setting 1: at most this many taps (0 = all) */
+static uint32_t cab_cyc;                           /* the IR's cycles in the last block */
+#define NAM_CTL_IRMAX (GP5_CTL_MHZ * 1000000u / GP5_SAMPLE_RATE * 64u * 90u / 100u)   /* model + IR above 90 %: the IR goes off */
+static const uint8_t *cab_seen;                    /* the file data last loaded (a new write moves it) */
+static uint32_t cab_seen_len;
+volatile uint32_t nam_cab_taps;                    /* taps in use, 0 = no IR file */
 
 volatile uint32_t nam_lstm_cycles, nam_bypass, nam_blocks, nam_lost, nam_dsp_cycles, nam_cycles, nam_worst;
-#define NAM_CTL_SLOW (288000000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)    /* 95 % of a block at 288 MHz */
-volatile uint32_t nam_a2_worst, nam_bind, nam_slow;   /* nam_slow: blocks over 95 %; at 50 the model stops */
+#define NAM_CTL_SLOW (GP5_CTL_MHZ * 1000000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)    /* 95 % of a block */
+volatile uint32_t nam_a2_worst, nam_bind, nam_slow;
+volatile uint32_t nam_lv[3], nam_clip[3];   /* meters (debug readout): peaks |x| since cleared, near-full-scale samples: input, model, after the IR */   /* nam_slow: blocks over 95 %; at 50 the model stops */
 
-/* Slot i's capture file (platform 0.4: the file "tone-NN" of NAM_FIRM, written by OpenGP5 Launchpad), or, until
- * Launchpad has moved the bank into files, the old fixed place in the data area; max = the bytes it may span. */
 #define NAM_FIRM 0x42504D41u                         /* "AMPB" */
 static const uint8_t *slot_at(int i, unsigned *max)
 {
@@ -55,16 +74,59 @@ static const uint8_t *slot_at(int i, unsigned *max)
     return GP5_DATA + (uint32_t)i * NAM_SLOT_BYTES;   /* (a sector a file now uses fails the capture's own checks) */
 }
 
-/* main loop: load slot `want` (or the built-in one), bind + prime this side's layers */
+/* A cab file: [0] "CAB1", [1] taps, [2] sample rate (48000), [3] reserved, then taps x float32 (little endian; the
+ * gain is the file's: Launchpad sets its loudest frequency to 0 dB), then (Launchpad) its name, 32 bytes UTF-8.
+ * Main loop: (re)load the playing tone's when it changed. */
+#define CAB_MAGIC 0x31424143u                        /* "CAB1" */
+static void cab_name(char *n)                       /* "cab-NN" for tone slot NN, "cab" for the built-in capture */
+{
+    if (cur >= 0) { n[0] = 'c'; n[1] = 'a'; n[2] = 'b'; n[3] = '-'; n[4] = (char)('0' + (cur + 1) / 10); n[5] = (char)('0' + (cur + 1) % 10); n[6] = 0; }
+    else { n[0] = 'c'; n[1] = 'a'; n[2] = 'b'; n[3] = 0; }
+}
+static void cab_check(void)
+{
+    uint32_t len = 0;
+    char name[8];
+    const uint8_t *f;
+    cab_name(name);
+    f = gp5_file(NAM_FIRM, name, &len);
+    const uint32_t *w = (const uint32_t *)f;
+    if (f == cab_seen && len == cab_seen_len) return;
+    cab_ready = 0;                                    /* the interrupt stops using it (plays the model dry) */
+    cab_seen = f; cab_seen_len = len; nam_cab_taps = 0;
+    if (!f || len < 16u || ((uint32_t)f & 3u) || w[0] != CAB_MAGIC || w[1] == 0 || w[1] > CABQ_MAX_TAPS ||
+        16u + 4u * w[1] > len || !gp5_file_check(NAM_FIRM, name)) { cabq_set(&cab, 0, 0); return; }
+    {
+        uint32_t n = w[1];
+        if (cab_limit && n > cab_limit) n = cab_limit;
+        cabq_set(&cab, (const float *)(w + 4), (int)n);
+        nam_cab_taps = n;
+    }
+    cab_ready = 1;
+}
+void nam_cab(int on) { cab_on = on ? 1u : 0u; cab_auto_off = 0; }
+void nam_cab_limit(unsigned taps) { cab_limit = taps; cab_seen = 0; cab_seen_len = 0; cab_check(); }   /* reload */
+unsigned nam_cab_get_limit(void) { return cab_limit; }
+int nam_cab_is_on(void) { return (int)cab_on; }
+unsigned nam_cab_len(void) { return nam_cab_taps; }
+
+/* main loop: load slot `want` (or the built-in one), bind this side's layers and prime them */
 static void load(void)
 {
-    int s = want;
+    static int32_t z[A2R_BLOCK], x0[A2R_BLOCK * A2R_C], o[A2R_BLOCK];
+    int s = want, rf, left;
     unsigned max = 0;
     const uint8_t *f = s >= 0 ? slot_at(s, &max) : 0;
     if (f && a2r_capture_parse(&cap, f, max) == 0) cap_file = (const uint32_t *)f;
     else { s = -1; a2r_capture_parse(&cap, a2r_default_capture, sizeof a2r_default_capture); cap_file = a2r_default_capture; }
-    nam_bind = (uint32_t)-a2r_bind_range(&a2, &cap.m, 0, A2_SPLIT, a2_mem, sizeof a2_mem);   /* 0 = ok */
-    if (!nam_bind) a2r_prime(&a2);                    /* NAM's pad_start for these layers */
+    nam_bind = (uint32_t)-a2r_bind_range(&a2, &cap.m, A2_SPLIT, cap.m.nl, a2_mem, sizeof a2_mem);   /* 0 = ok */
+    if (!nam_bind && !a2r_bind_range(&a2pre, &cap.m, 0, A2_SPLIT, pre_mem, sizeof pre_mem)) {
+        /* NAM's pad_start for our layers: silence through the DSP's layers (their state settles within their
+         * receptive field), then that steady stream through ours for the whole receptive field */
+        for (rf = cap.m.kh, left = 0; left < cap.m.nl; left++) rf += (cap.m.layers[left].K - 1) * cap.m.layers[left].D;
+        for (left = 0; left < 4; left++) a2r_run(&a2pre, z, 0, x0, o, 0);
+        for (left = rf - 1; left > 0; left -= A2R_BLOCK) a2r_run(&a2, z, x0, 0, o, 1);
+    }
     nam_slow = 0; nam_a2_worst = 0; nam_worst = 0; woff = 0;
     cur = want = s;
 }
@@ -87,14 +149,24 @@ static int scan_slot(int i)
 
 static void on_block(const int32_t *in, int32_t *out)
 {
+    static int32_t ys[A2R_BLOCK];
+    static int32_t uu[A2R_BLOCK], xx[A2R_BLOCK * A2R_C], yd[A2R_BLOCK];
     uint32_t t0 = __nds32__mfsr(NDS32_SR_PFMC0), t, i, pk = in_peak;
     if (st == ST_LOAD || (uint32_t)in[0] != MAGIC_D || nam_bind) { nam_lost++; out[0] = 0; return; }
+    {   /* the DSP's blocks, unpacked (pack24.h) */
+        uint32_t s = (uint32_t)in[LW_SHIFTS];
+        unsigned su = s & 15u, sx[3] = { (s >> 4) & 15u, (s >> 8) & 15u, (s >> 12) & 15u }, sy = (s >> 16) & 15u;
+        p24_unpack(in + LW_U, A2R_BLOCK, &su, 1, uu);
+        if (in[LW_DVALID]) { p24_unpack(in + LW_X, A2R_BLOCK * A2R_C, sx, 3, xx); p24_unpack(in + LW_YD, A2R_BLOCK, &sy, 1, yd); }
+    }
     for (i = 0; i < A2R_BLOCK; i++) {
-        int32_t v = in[LW_U + i];
+        int32_t v = uu[i];
         uint32_t a = v < 0 ? (uint32_t)(-(v + 1)) : (uint32_t)v;
         if (a > pk) pk = a;
     }
     in_peak = pk;
+    if (pk > nam_lv[0]) nam_lv[0] = pk;
+    for (i = 0; i < A2R_BLOCK; i++) { int32_t v = uu[i]; if (v > 0x7FFF0000 || v < -0x7FFF0000) nam_clip[0]++; }
     if (st == ST_SEND || (uint32_t)in[LW_DSPCRC] != cap.crc) {   /* the DSP does not have this capture yet */
         uint32_t total = cap.length / 4u, n = total - woff;
         if ((uint32_t)in[LW_DSPCRC] == cap.crc) { st = ST_PLAY; gain = 0; }
@@ -108,6 +180,7 @@ static void on_block(const int32_t *in, int32_t *out)
             return;
         }
     }
+    if (!in[LW_DVALID]) { nam_lost++; out[0] = 0; return; }   /* the DSP's layers did not run on this block */
     if (st == ST_FADE) {
         gain = gain > UNITY / NAM_FADE_OUT ? gain - UNITY / NAM_FADE_OUT : 0;
         if (!gain) st = ST_LOAD;                       /* this block still goes out, silent; the main loop loads */
@@ -115,10 +188,40 @@ static void on_block(const int32_t *in, int32_t *out)
         gain = gain + UNITY / NAM_FADE_IN < UNITY ? gain + UNITY / NAM_FADE_IN : UNITY;
     }
     if (nam_slow >= 50u) { nam_lost++; out[0] = 0; return; }
-    a2r_run(&a2, in + LW_U, 0, out + LW_X, out + LW_Y, 0);
+    a2r_run(&a2, uu, xx, 0, ymine, 1);
+    cab_cyc = 0;
+    {   /* the shares added (clamped at full scale), metered: peak since the computer last cleared it, clipped samples */
+        uint32_t pm = nam_lv[1];
+        for (i = 0; i < A2R_BLOCK; i++) {
+            int64_t sm = (int64_t)ymine[i] + yd[i];
+            uint64_t a = (uint64_t)(sm < 0 ? -sm : sm);
+            if (a > 0x7FFF0000ull) nam_clip[1]++;
+            if (a > pm) pm = a > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)a;
+            ys[i] = sm > 2147483647LL ? 2147483647 : sm < -2147483648LL ? (int32_t)0x80000000 : (int32_t)sm;
+        }
+        nam_lv[1] = pm;
+    }
+    if (cab_on && cab_ready) {
+        uint32_t tc = __nds32__mfsr(NDS32_SR_PFMC0);                         /* the cab IR */
+        cabq_run(&cab, ys, out + LW_Y);
+        cab_cyc = __nds32__mfsr(NDS32_SR_PFMC0) - tc;
+    } else {
+        for (i = 0; i < A2R_BLOCK; i++) out[LW_Y + i] = ys[i];
+    }
+    {   /* the output (after the IR), metered */
+        uint32_t po = nam_lv[2];
+        for (i = 0; i < A2R_BLOCK; i++) {
+            int32_t v = out[LW_Y + i];
+            uint32_t a = v < 0 ? (uint32_t)(-(v + 1)) + 1u : (uint32_t)v;
+            if (a > 0x7FFF0000u) nam_clip[2]++;
+            if (a > po) po = a;
+        }
+        nam_lv[2] = po;
+    }
     t = __nds32__mfsr(NDS32_SR_PFMC0) - t0;
     nam_lstm_cycles = t;
-    if (t > NAM_CTL_SLOW) nam_slow++;                       /* too slow: keep USB and the screen alive, stop the model */
+    if (cab_cyc && t > NAM_CTL_IRMAX) { cab_on = 0; cab_auto_off = 1; }   /* the IR goes first (the main loop needs time too) */
+    else if (t > NAM_CTL_SLOW) nam_slow++;             /* too slow without it: keep USB and the screen alive, stop the model */
     if (nam_blocks > 100 && t > nam_a2_worst) nam_a2_worst = t;
     out[LW_RTAG] = in[LW_TAG];
     out[LW_FLAGS] = (int32_t)((nam_bypass & 1u) | 2u);
@@ -126,6 +229,9 @@ static void on_block(const int32_t *in, int32_t *out)
     out[LW_CTLCYC] = (int32_t)t;
     out[LW_CAPCRC] = (int32_t)cap.crc;
     out[LW_GAIN] = (int32_t)gain;
+    out[LW_CAB] = (int32_t)cab_cyc; out[LW_CAB + 1] = (int32_t)cab.cyc_fwd; out[LW_CAB + 2] = (int32_t)cab.cyc_mac;
+    out[LW_CAB + 3] = (int32_t)cab.cyc_inv;
+    out[LW_CAB + 4] = (int32_t)(nam_cab_taps | (cab_on & 1u) << 16 | (cab_auto_off & 1u) << 17);
     out[0] = (int32_t)MAGIC_N;
     nam_dsp_cycles = (uint32_t)in[LW_DSPCYC];
     nam_cycles = __nds32__mfsr(NDS32_SR_PFMC0) - t0;
@@ -160,17 +266,19 @@ void nam_select(int slot)
     if (st == ST_PLAY) st = gain ? ST_FADE : ST_LOAD;
 }
 
-/* main loop (fw_knob, every 10 ms): a pending load; new captures in the bank */
+/* main loop (fw_knob, every 10 ms): a pending load; new captures in the bank; the cab file about once a second */
 int nam_poll(void)
 {
+    static unsigned tick;
     int got = -1;
-    if (st == ST_LOAD) { load(); st = ST_SEND; }
+    if (st == ST_LOAD) { load(); st = ST_SEND; cab_check(); }   /* the new tone's cab */
     else if (st == ST_PLAY && want != cur) st = gain ? ST_FADE : ST_LOAD;   /* chosen during a switch */
     {   /* one slot per call (every 10 ms): finding a file reads 47 headers */
         static int next;
         if (scan_slot(next)) got = next;
         next = (next + 1) % NAM_SLOTS;
     }
+    if (++tick % 100u == 0) cab_check();
     if (got >= 0) { nam_select(got); return got; }    /* just uploaded: play it */
     return -2;
 }
@@ -181,10 +289,14 @@ void nam_start(int slot)
     int i;
     __nds32__mtsr(1u, NDS32_SR_PFM_CTL);              /* performance counter 0: count cycles */
     __nds32__isb();
+    cabq_tables();
+    cab.variant = 1;                                  /* radix-4, one partition per pass: the fastest measured */
+    cabq_set(&cab, 0, 0);
     for (i = 0; i < NAM_SLOTS; i++) scan_slot(i);
     if (!nam_slot_ok(slot)) for (slot = -1, i = 0; i < NAM_SLOTS && slot < 0; i++) if (slot_ok[i]) slot = i;
     want = slot;
     load();
+    cab_check();                                      /* its cab */
     st = ST_SEND; gain = 0;
     gp5_link_start(on_block);
 }

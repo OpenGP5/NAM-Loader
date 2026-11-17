@@ -6,31 +6,80 @@
   a2r_export.py model.nam calib48k.wav out.inc   the capture file as a C array (a built-in default capture)
   [--headroom 4] [--name "shown on the screen"]
 calib48k.wav may be the word synth: calib_synth.py's made-up signal instead of NAM's input recording.
-Formats: see a2r.h. Ranges come from a2q_export.py's float forward over the calibration audio
+Formats: see a2r.h. Ranges come from tools/a2q_export.py's float forward over the calibration audio
 (the NAM input file at 48 kHz: full scale, so the ranges cover real playing).
 """
-import argparse, json, struct, sys, zlib
+import argparse, json, math, struct, sys, zlib
 from pathlib import Path
 import numpy as np, soundfile as sf
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import a2_export, a2q_export as Q
 
 I16, I32 = 32767, 2 ** 31 - 1
+PEDAL_INPUT_DBU = 7.1   # the GP-5's input at full scale (measured: a test tone through the pedal and an audio interface)
+OUTPUT_LEVEL = -20.0    # every capture's loudness (K-weighted, dB) for the plucked chords below: the middle of 48 captures
+OUTPUT_PEAK_MAX = -3.0  # ... unless that puts their peak above this (dBFS)
+PLAY_SCALE = 0.17782794100389229   # the chords at -15 dBFS peak: hard playing measured at the pedal's input (2026-11-17)
+# BS.1770 K-weighting at 48 kHz (the shelf, then the high-pass)
+KW = ((1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585),
+      (1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621))
+
+
+def calibration_gain(nam, pedal_dbu=PEDAL_INPUT_DBU):
+    """The input gain that makes the pedal drive a capture as hard as it was recorded: its metadata says what level
+    its full scale was (input_level_dbu); the pedal's is pedal_dbu. 1.0 for a capture without that (uncalibrated)."""
+    dbu = (nam.get('metadata') or {}).get('input_level_dbu')
+    return 10 ** ((pedal_dbu - float(dbu)) / 20) if isinstance(dbu, (int, float)) else 1.0
+
+
+def output_level(m):
+    """The capture's loudness (K-weighted, dB) and peak (dBFS) for the first 3 s of the calibration signal (plucked
+    chords) at PLAY_SCALE, the first 50 ms left out. Written out sample by sample: gp5nam.js outputLevel() does the
+    very same sums. Returns the gain (dB, to 0.01) that puts it at OUTPUT_LEVEL with its peak at most OUTPUT_PEAK_MAX."""
+    import calib_synth                         # always the made-up chords, whatever audio sets the ranges
+    y, _ = Q.forward_float(m, np.array(calib_synth.calib_signal()[:3 * 48000]) * PLAY_SCALE)
+    y = [float(v) for v in y[2400:]]
+    kw = y
+    for b0, b1, b2, a1, a2 in KW:
+        x1 = x2 = y1 = y2 = 0.0; o = []
+        for x in kw:
+            v = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2, x1, y2, y1 = x1, x, y1, v; o.append(v)
+        kw = o
+    ms = 0.0
+    for v in kw: ms += v * v
+    loud = 10 * math.log10(ms / len(kw) + 1e-30)
+    pk = 0.0
+    for v in y: pk = max(pk, abs(v))
+    peak = 20 * math.log10(pk + 1e-30)
+    g = max(-40.0, min(40.0, OUTPUT_LEVEL - loud, OUTPUT_PEAK_MAX - peak))
+    return math.floor(g * 100 + 0.5) / 100, loud, peak
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('model'); ap.add_argument('calib'); ap.add_argument('out')
     ap.add_argument('--headroom', type=float, default=4.0)
+    ap.add_argument('--no-calibration', action='store_true', help='ignore the capture\'s input_level_dbu')
+    ap.add_argument('--no-level', action='store_true', help='keep the capture\'s own output level')
     ap.add_argument('--name', default=None, help='header: C name (a2r_model); capture file: the name shown (default: file name)')
     a = ap.parse_args()
-    m = Q.unpack(a2_export.check_a2(a2_export.pick_wavenet(json.loads(Path(a.model).read_text()), 3)))
+    nam = json.loads(Path(a.model).read_text())
+    m = Q.unpack(a2_export.check_a2(a2_export.pick_wavenet(nam, 3)))
+    # calibration: the guitar enters only through rech and each layer's mix, so scaling those is the input gain
+    g = 1.0 if a.no_calibration else calibration_gain(nam)
+    m['rech'] = m['rech'] * g
+    for L in m['layers']: L['mix'] = L['mix'] * g
+    if g != 1.0: print(f'calibrated: input {20 * np.log10(g):+.1f} dB (capture {nam["metadata"]["input_level_dbu"]} dBu, pedal {PEDAL_INPUT_DBU} dBu)')
     if a.calib == 'synth':                     # the made-up signal (calib_synth.py): what the web page uses
         import calib_synth
         u = np.array(calib_synth.calib_signal())
     else:
         u, sr = sf.read(a.calib, dtype='float64', always_2d=True); u = u.mean(1)
+    if not a.no_level:                         # output: every capture equally loud (the head's scale; no range changes)
+        gdb, loud, peak = output_level(m)
+        m['hs'] = m['hs'] * 10 ** (gdb / 20)
+        print(f'output level: {loud:.1f} dB, peak {peak:.1f} dBFS -> {gdb:+.2f} dB')
     _, R = Q.forward_float(m, u)
     hr = a.headroom
     X = Q.exp_for(max(R['x']), I32, hr)
