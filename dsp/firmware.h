@@ -10,14 +10,8 @@
  *                                [old tags][capture checksum held][capture pieces received][bad captures]
  *                  raw 317f0400 -> link check (blocks without the control processor's words, repeats, skips, ...)
  *                  raw 327f0400 -> the control processor's cycles: [last][worst][per block] */
-#define GP5_AUDIO_LINK
-#ifndef GP5_LINK_EARLY   /* build.py passes it too */
-#define GP5_LINK_EARLY   /* the exchange starts at the start of each block (platform/dsp/audio.h) */
-#endif
-#define GP5_LINK_WORDS 264u
-// #define GP5_CTL_FMA        /* the control processor's files with fused multiply-adds (the cab IR) */
-#define GP5_CTL_MHZ 320u   /* the control processor at stock's 320 MHz, core at 1.25 V (platform 0.6): room for the cab IR */
-#define GP5_SAMPLE_RATE 48000u   /* NAM captures are trained at 48 kHz: run them at their own rate (platform 0.5.6) */
+/* The audio link (264 words, exchanged at the start of each block), 48 kHz and the control processor at 320 MHz:
+ * ../firmware.json (OpenGP5 1.0). */
 #define NAM_DSP_SLOW (191900000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)   /* 95 % of a block, core cycles */
 
 #include "../split.h"
@@ -36,6 +30,9 @@ static uint32_t cyc, worst, seq_bad, seq_last, slow, d_tagdup, d_tagold;
 static uint32_t ctl_cyc, ctl_worst;              /* the control processor's cycles (LW_CTLCYC), for 0x7F32 */
 static uint32_t cabw[5];                          /* the cab IR's cycles and state (LW_CAB), for 0x7F33 */
 static uint32_t d_notok, d_dup, d_skip, d_since, d_gi, d_gap[8];
+
+/* its parameters (../params.h) are all the control processor's: nothing to do here */
+static void fw_param(uint32_t id, int32_t value) { (void)id; (void)value; }
 
 static void fw_init(void)
 {

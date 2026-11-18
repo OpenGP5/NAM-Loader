@@ -9,6 +9,7 @@ void nam_select(int slot);             /* switch to a slot (-1: the built-in cap
 int nam_slot_ok(int i);                /* slot i holds a good capture */
 const char *nam_slot_name(int i);
 int nam_current(void);                 /* the slot playing, -1 = built-in */
+uint32_t nam_current_crc(void);        /* its checksum: a tone's gate / EQ settings belong to it */
 const char *nam_name(void);            /* the capture playing */
 int nam_busy(void);                    /* switching */
 unsigned nam_progress(void);           /* 0..255 through a switch */
@@ -18,4 +19,8 @@ int nam_cab_is_on(void);
 void nam_cab_limit(unsigned taps);     /* at most this many taps of the IR file, 0 = all (live setting 1) */
 unsigned nam_cab_get_limit(void);
 unsigned nam_cab_len(void);            /* taps in use, 0 = no IR file */
+void nam_tone(uint8_t gate, uint8_t bass, uint8_t mid, uint8_t treble);   /* the gate and EQ (../tone.h), main loop */
+#define NAM_GATE_MAX 61u                /* gate: 0 off, 1..61 = -90..-30 dBFS (tone.h) */
+#define NAM_EQ_MAX 24u                  /* bass / mid / treble: 0..24 = -12..+12 dB */
+#define NAM_EQ_FLAT 12u
 #endif

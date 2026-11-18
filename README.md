@@ -1,15 +1,19 @@
 # NAM Loader
 
 **A capture player firmware for the Valeton GP-5, built on [OpenGP5](https://github.com/OpenGP5/OpenGP5).**
-Version 1.1.0, on OpenGP5 0.6.0-alpha.
+Version 1.2.0, on OpenGP5 0.7.0-alpha.
 
 It plays [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) A2 captures (their A2-Lite
 part) on the pedal itself, at 48 kHz, the rate captures are trained at. The model is split across both of the
 pedal's processors: the DSP runs the first layers, the control processor (at 320 MHz) the rest, the output and a
 cab impulse response. You keep up to 12 captures on the pedal, each with its own cab IR if you like, and switch
-between them with the PARA knob.
+between them with the PARA knob. Each capture keeps its own noise gate and 3-band EQ.
 
-New in 1.1.0: a cab IR per slot (1,024 taps, 21 ms), 48 kHz, captures driven as hard as they were recorded
+New in 1.2.0: a noise gate (after the model, before the cab IR) and a bass / mid / treble EQ (last) for each capture,
+set from Launchpad and kept with the capture. Its settings are OpenGP5 1.0 parameters, so any tool that speaks
+OpenGP5 can read and set them (`gp5_link.py params`).
+
+1.1.0: a cab IR per slot (1,024 taps, 21 ms), 48 kHz, captures driven as hard as they were recorded
 (input calibration) and every capture equally loud (output levelling).
 
 > **Alpha.** Flashing custom firmware can go wrong. Read OpenGP5's
@@ -30,7 +34,8 @@ volume. The slot playing is remembered across power-off.
 
 ## Getting captures onto the pedal
 
-Use [OpenGP5 Launchpad](https://github.com/OpenGP5/Launchpad) 0.1.1 or later: its Tones page takes a `.nam` file
+Use [OpenGP5 Launchpad](https://github.com/OpenGP5/Launchpad) 0.2.0 or later (0.1.1 for everything but the gate and
+EQ): its Tones page takes a `.nam` file
 (A2), converts its A2-Lite part and writes it into a slot. A1 (older) captures can't be played. With the bank
 empty, the pedal plays its built-in capture, "NAM A2 demo".
 
@@ -69,13 +74,15 @@ the installed firmware). Back that up first, for example with Launchpad.
 | `split.h` | where the model is split, the slot bank, and the audio link's words; shared by both sides |
 | `pack24.h` | the DSP's results packed as 24-bit block floating point, so they fit the audio link at 48 kHz |
 | `nds32/a2.c` | the control processor's layers, the output and the cab IR, run in the audio link's interrupt; the slot bank and switching (fade out, load, fade in) |
-| `nds32/firmware.c` | the controls, the yellow 160 x 80 screen and the live settings (USB `7E 10`: 0 = cab IR on / off, 1 = at most N taps) |
+| `firmware.json`, `params.h` | who it is (OpenGP5 1.0) and its parameters: cab IR on / off, taps, gate, bass, mid, treble |
+| `tone.h` | the noise gate and the 3-band EQ, in fixed point |
+| `nds32/firmware.c` | the controls, the yellow 160 x 80 screen, and each capture's gate and EQ (kept with its checksum) |
 | `dsp/firmware.h` | the DSP's layers, the bypass and the dry signal |
 | `cab/cabq.h` | the cab IR: a fixed-point partitioned FFT convolver (64-sample blocks, the control processor's integer DSP instructions; its float unit is too slow for it) |
 | `default_capture.inc` | the built-in capture (see `CAPTURE-LICENSE.txt`) |
 | `tools/a2r_export.py` | converts a `.nam` file into a capture file (`.a2r`) or a built-in one (`.inc`), with input calibration and output levelling (`--no-calibration`, `--no-level`); needs numpy and soundfile |
 | `tools/make_cab.py` | converts a `.wav` IR into a cab file, as Launchpad does; needs numpy, soundfile and scipy |
-| `opengp5/` | the platform, a git submodule pinned to a tested release (0.6.0-alpha) |
+| `opengp5/` | the platform, a git submodule pinned to a tested release (0.7.0-alpha) |
 
 To rebuild the built-in capture:
 

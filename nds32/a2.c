@@ -19,6 +19,9 @@
 #define CABQ_MAX_TAPS 1024
 #define CABQ_CYCLES() __nds32__mfsr(NDS32_SR_PFMC0)
 #include "../cab/cabq.h"     /* fixed point: this FPU is too slow for it */
+#include "gp5_math.h"
+#include "gp5_math.c"               /* the platform's sinf / cosf / expf (tone.h's coefficients, main loop only) */
+#include "../tone.h"                /* the noise gate and the 3-band EQ, after the IR */
 #include "../default_capture.inc"
 #include "../split.h"
 #include "../pack24.h"
@@ -45,6 +48,11 @@ static uint8_t slot_ok[NAM_SLOTS];
 static char slot_name[NAM_SLOTS][25];
 static uint32_t in_peak;                /* largest input sample since the screen last asked */
 static int32_t ymine[A2R_BLOCK];
+
+/* the tone section (gate + EQ), its settings per tone: firmware.c */
+static tone_t tone;
+_Static_assert(NAM_GATE_MAX == TONE_GATE_MAX && NAM_EQ_MAX == TONE_EQ_MAX && NAM_EQ_FLAT == TONE_EQ_FLAT, "nam.h and tone.h ranges");
+void nam_tone(uint8_t gate, uint8_t bass, uint8_t mid, uint8_t treble) { tone_set(&tone, (tone_set_t){ gate, bass, mid, treble }); }
 
 /* the cab IR */
 static cabq_t cab;
@@ -201,6 +209,7 @@ static void on_block(const int32_t *in, int32_t *out)
         }
         nam_lv[1] = pm;
     }
+    tone_gate(&tone, uu, ys, A2R_BLOCK);                 /* the gate: listens to the input, turns the model down */
     if (cab_on && cab_ready) {
         uint32_t tc = __nds32__mfsr(NDS32_SR_PFMC0);                         /* the cab IR */
         cabq_run(&cab, ys, out + LW_Y);
@@ -208,7 +217,8 @@ static void on_block(const int32_t *in, int32_t *out)
     } else {
         for (i = 0; i < A2R_BLOCK; i++) out[LW_Y + i] = ys[i];
     }
-    {   /* the output (after the IR), metered */
+    tone_eq(&tone, out + LW_Y, A2R_BLOCK);               /* the EQ, last */
+    {   /* the output (after the IR, the gate and the EQ), metered */
         uint32_t po = nam_lv[2];
         for (i = 0; i < A2R_BLOCK; i++) {
             int32_t v = out[LW_Y + i];
@@ -243,6 +253,7 @@ static void on_block(const int32_t *in, int32_t *out)
 int nam_slot_ok(int i) { return i >= 0 && i < NAM_SLOTS && slot_ok[i]; }
 const char *nam_slot_name(int i) { return nam_slot_ok(i) ? slot_name[i] : ""; }
 int nam_current(void) { return cur; }
+uint32_t nam_current_crc(void) { return cap.crc; }   /* the capture playing (the built-in one too) */
 const char *nam_name(void) { return cap.name; }
 int nam_busy(void) { return st != ST_PLAY; }
 unsigned nam_progress(void)                           /* 0..255 through a switch */
@@ -292,6 +303,7 @@ void nam_start(int slot)
     cabq_tables();
     cab.variant = 1;                                  /* radix-4, one partition per pass: the fastest measured */
     cabq_set(&cab, 0, 0);
+    tone_init(&tone);
     for (i = 0; i < NAM_SLOTS; i++) scan_slot(i);
     if (!nam_slot_ok(slot)) for (slot = -1, i = 0; i < NAM_SLOTS && slot < 0; i++) if (slot_ok[i]) slot = i;
     want = slot;
