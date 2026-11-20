@@ -34,10 +34,10 @@ point to run it in real time. The result is about 65 dB from NAM's own floating-
 
 - **With [OpenGP5 Launchpad](https://github.com/OpenGP5/Launchpad):** it comes with NAM Loader. Open **Flash**,
   choose NAM Loader, and flash. Launchpad is also how you put captures and IRs on the pedal.
-- **From a release:** download `GP-5_nam-player.bin` from [Releases](https://github.com/OpenGP5/NAM-Loader/releases/latest)
+- **From a release:** download `GP-5_nam-loader.bin` (up to 1.3.1: `GP-5_nam-player.bin`) from [Releases](https://github.com/OpenGP5/NAM-Loader/releases/latest)
   and flash it with Launchpad (**Your own file**) or from the command line:
   ```bash
-  python3 opengp5/tools/gp5tool.py flash GP-5_nam-player.bin --sections all
+  python3 opengp5/tools/gp5tool.py flash GP-5_nam-loader.bin --sections all
   ```
 
 Updating from an earlier NAM Loader keeps your captures, IRs and settings.
@@ -94,8 +94,8 @@ macOS or the 32-bit C library on Linux and WSL.
 git clone --recursive https://github.com/OpenGP5/NAM-Loader.git
 cd NAM-Loader
 opengp5/release/setup-toolchain.sh      # once: the two compilers, into opengp5/fw-build/
-./build.sh                              # -> build/GP-5_nam-player.bin
-python3 opengp5/tools/gp5tool.py flash build/GP-5_nam-player.bin --sections all
+./build.sh                              # -> build/GP-5_nam-loader.bin
+python3 opengp5/tools/gp5tool.py flash build/GP-5_nam-loader.bin --sections all
 ```
 
 To rebuild the built-in capture:
