@@ -155,6 +155,11 @@ void fw_param_changed(unsigned id)
     if (id == GP5_P_TAPS) nam_cab_limit((unsigned)gp5_param(GP5_P_TAPS));
     if (id >= GP5_P_GATE && id <= GP5_P_TREBLE) tone_change(id - GP5_P_GATE, (unsigned)gp5_param(id));
     if (id == GP5_P_IR) ir_choose((int)gp5_param(GP5_P_IR) - 1);
+    if (id == GP5_P_SLOT) {                          /* switch, as a push in the bank does (an empty slot: no change) */
+        int s = (int)gp5_param(GP5_P_SLOT) - 1;
+        if (s < 0 || nam_slot_ok(s)) { choose(s); browsing = 0; }
+        gp5_param_set(GP5_P_SLOT, nam_current() + 1);   /* (until the switch is done: the one playing) */
+    }
 }
 int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB", "all", "512 taps" */
 {
@@ -163,6 +168,11 @@ int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB",
     if (id == GP5_P_TAPS) {
         if (!v) { t[0] = 'a'; t[1] = 'l'; t[2] = 'l'; t[3] = 0; return 1; }
         gp5_fmt(t, 16, "%ld taps", (long)v); return 1;
+    }
+    if (id == GP5_P_SLOT) {                          /* "built-in", or the capture's name (15 characters at most) */
+        const char *s = v > 0 && nam_slot_ok((int)v - 1) ? nam_slot_name((int)v - 1) : v > 0 ? "empty" : "built-in";
+        for (n = 0; n < 15 && s[n]; n++) t[n] = s[n];
+        t[n] = 0; return 1;
     }
     if (id == GP5_P_IR) {                            /* "none", or the IR's name (15 characters at most) */
         const char *s = v > 0 && nam_ir_ok((int)v - 1) ? nam_ir_name((int)v - 1) : "none";
@@ -229,6 +239,7 @@ void fw_tick(void)                                   /* every 10 ms: the clock f
     if (nam_current_crc() != tone_key && !nam_busy()) tone_apply();       /* another capture: its settings */
     if (!nam_busy() && ir_want() != nam_ir_current()) nam_ir_select(ir_want());   /* its IR (or one just uploaded) */
     if (gp5_param(GP5_P_IR) != nam_ir_current() + 1) gp5_param_set(GP5_P_IR, nam_ir_current() + 1);
+    if (!nam_busy() && gp5_param(GP5_P_SLOT) != nam_current() + 1) gp5_param_set(GP5_P_SLOT, nam_current() + 1);
     if (save_due && (int)(ticks - save_due) >= 0) { save_due = 0; gp5_store_save(STORE_TONE, trec, sizeof trec); }
 }
 

@@ -1,7 +1,7 @@
 # NAM Loader
 
 **A capture player firmware for the Valeton GP-5, built on [OpenGP5](https://github.com/OpenGP5/OpenGP5).**
-Version 1.3.0, on OpenGP5 0.8.0-alpha.
+Version 1.3.1, on OpenGP5 0.8.0-alpha.
 
 It plays [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) A2 captures (their A2-Lite
 part) on the pedal itself, at 48 kHz, the rate captures are trained at. The model is split across both of the
@@ -13,7 +13,10 @@ The network is the capture's own, every layer and weight, computed in fixed poin
 signal through the network in 32): the output is about 65 dB from NAM's own floating-point result on guitar (on the captures it was developed with). The
 pedal's processors are too slow at floating point to run it in real time.
 
-New in 1.3.0: captures and cab IRs are chosen independently. 30 capture slots (from 12) and a bank of 12 IRs; on
+1.3.1: a Capture parameter (id 7, 0 to 30): a computer sets it to switch the capture playing, as pushing PARA in the
+list does. Launchpad 0.3's Tones page uses it for Play on the pedal. Nothing else changes.
+
+1.3.0: captures and cab IRs are chosen independently. 30 capture slots (from 12) and a bank of 12 IRs; on
 the pedal, turn PARA between the NAM page (the capture) and the CAB page (its IR), push it for that page's list.
 The captures play exactly as in 1.2. IRs are stored in 16 bits (one storage sector each; the older float files
 still play): 30 captures and 12 IRs fill the storage. Your 1.2 pairings carry over (tone 3 plays IR 3 until you
@@ -86,7 +89,7 @@ the installed firmware). Back that up first, for example with Launchpad.
 | `split.h` | where the model is split, the sizes of the capture and IR banks, and the audio link's words; shared by both sides |
 | `pack24.h` | the DSP's results packed as 24-bit block floating point, so they fit the audio link at 48 kHz |
 | `nds32/a2.c` | the control processor's layers, the output and the cab IR, run in the audio link's interrupt; the capture and IR banks, and switching (fade out, load, fade in) |
-| `firmware.json`, `params.h` | who it is (OpenGP5 1.0) and its parameters: cab IR on / off, taps, gate, bass, mid, treble, the IR chosen |
+| `firmware.json`, `params.h` | who it is (OpenGP5 1.0) and its parameters: cab IR on / off, taps, gate, bass, mid, treble, the IR chosen, the capture playing |
 | `tone.h` | the noise gate and the 3-band EQ, in fixed point |
 | `nds32/firmware.c` | the controls, the yellow 160 x 80 screen (NAM and CAB pages, the lists, TONE), and each capture's gate, EQ and IR (kept with its checksum) |
 | `dsp/firmware.h` | the DSP's layers, the bypass and the dry signal |
