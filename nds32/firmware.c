@@ -1,18 +1,20 @@
 /* NAM A2-Lite capture player, control-processor UI. The bank and the switching are in a2.c (nam.h).
  *
- *   turn PARA     browse the bank (the capture playing keeps playing); after 5 s still: back
- *   push PARA     load the highlighted capture (browsing), or start browsing
+ *   turn PARA     NAM page (the capture playing) <-> CAB page (its IR); in a list: move
+ *   push PARA     the list of the page shown: the capture bank (NAM) or the IRs (CAB, with NONE); in a list: load
+ *                 the highlighted one (the capture playing keeps playing while you browse); after 5 s still: back
  *   hold PARA     the TONE page of the capture playing (0.6 s; again to leave, or 10 s untouched):
  *                 turn to pick GATE / BASS / MID / TREBLE, push to adjust it (turn), push again to pick
  *   foot switch   bypass
  *   volume knob   output level
- * Each tone keeps its own gate and EQ (../tone.h), saved with the capture's checksum: a new capture in a slot
- * starts with the gate off and the EQ flat. The tone playing's values are also parameters (../params.h, OpenGP5 1.0),
+ * Each tone keeps its own gate, EQ (../tone.h) and IR, saved with the capture's checksum: a new capture in a slot
+ * starts with the gate off, the EQ flat and the IR of the same number if there is one (as before 1.3, when tone NN
+ * always played cab-NN), none otherwise. The tone playing's values are also parameters (../params.h, OpenGP5 1.0),
  * so a computer reads and sets them (Launchpad's Gate and EQ card, gp5_link.py set Gate 30).
  *
  * Screen (160 x 80, yellow on near-black, the platform's sans font):
- *   header  AMP / BYPASS / LOADING nn / BANK, slot nn / 12 on the right
- *   name    the capture's name, large; a name wider than the screen slides to its end and back
+ *   header  NAM or CAB (two dots: the page) / BYPASS / LOADING nn / BANK / CABS; on the right slot nn / 30, IR nn / 12
+ *   name    the capture's name (NAM) or the IR's (CAB), large; a name wider than the screen slides to its end and back
  *   footer  input meter and the volume; while switching, a progress bar
  * The slot playing is remembered across power-off (the platform's store). */
 #include "gp5_firmware.h"
@@ -50,11 +52,15 @@ static uint32_t rgb(rgb_t c) { return ((uint32_t)c.r << 16) | ((uint32_t)c.g << 
 static unsigned ticks, browsing, browse_until, loading_until, show_empty_until;
 static int cursor;
 
-/* ---- each tone's gate and EQ: [0..11] the slots, [12] the built-in capture; a setting belongs to a checksum ---- */
-typedef struct { uint32_t crc; uint8_t v[4]; } tone_rec_t;      /* gate, bass, mid, treble (tone.h's ranges) */
+/* ---- each tone's gate, EQ and IR: [0..29] the slots, [30] the built-in capture; a setting belongs to a checksum ---- */
+typedef struct { uint32_t crc; uint8_t v[4]; uint8_t ir, pad[3]; } tone_rec_t;   /* gate, bass, mid, treble (tone.h's
+                                                     ranges); ir: 0 the default (below), 1 none, 2.. IR 1.. */
+typedef struct { uint32_t crc; uint8_t v[4]; } tone_rec12_t;    /* before 1.3: 12 slots + the built-in one */
 static tone_rec_t trec[NAM_SLOTS + 1];
 static const uint8_t tmax[4] = { NAM_GATE_MAX, NAM_EQ_MAX, NAM_EQ_MAX, NAM_EQ_MAX };
 static unsigned save_due, editing, edit_row, adjusting, edit_until;
+static unsigned page;                                /* 0 NAM, 1 CAB */
+static unsigned blist;                               /* the list being browsed: 0 captures, 1 IRs (row 0 NONE) */
 static uint32_t tone_key = 1;                        /* the capture whose settings are applied (1: none yet) */
 
 static unsigned tidx(void) { int c = nam_current(); return c < 0 ? NAM_SLOTS : (unsigned)c; }
@@ -69,22 +75,55 @@ static void tone_params(const uint8_t v[4])        /* the parameters show the to
     gp5_param_set(GP5_P_GATE, v[0]); gp5_param_set(GP5_P_BASS, v[1]); gp5_param_set(GP5_P_MID, v[2]); gp5_param_set(GP5_P_TREBLE, v[3]);
 }
 static void tone_apply(void) { uint8_t v[4]; tone_get(v); nam_tone(v[0], v[1], v[2], v[3]); tone_params(v); tone_key = nam_current_crc(); }
+static tone_rec_t *tone_own(void)                   /* the tone playing's record, started afresh for a new capture */
+{
+    tone_rec_t *t = &trec[tidx()];
+    if (t->crc != nam_current_crc() || !t->crc) {
+        uint8_t v[4];
+        tone_get(v);
+        t->crc = nam_current_crc(); t->v[0] = v[0]; t->v[1] = v[1]; t->v[2] = v[2]; t->v[3] = v[3]; t->ir = 0;
+    }
+    return t;
+}
+static void save_soon(void) { save_due = ticks + SAVE_TICKS; if (!save_due) save_due = 1; }
+/* the IR the tone playing plays (-1: none): its choice, or by default the one of the same number */
+static int ir_want(void)
+{
+    const tone_rec_t *t = &trec[tidx()];
+    int c = nam_current();
+    if (t->crc == nam_current_crc() && t->crc && t->ir) return t->ir >= 2 && nam_ir_ok(t->ir - 2) ? t->ir - 2 : -1;
+    return c >= 0 && c < (int)NAM_IRS && nam_ir_ok(c) ? c : -1;
+}
+static void ir_choose(int i)                         /* -1: none */
+{
+    tone_own()->ir = (uint8_t)(i < 0 ? 1 : i + 2);
+    nam_ir_select(ir_want());
+    gp5_param_set(GP5_P_IR, nam_ir_current() + 1);
+    save_soon();
+}
 static void tone_change(unsigned k, unsigned value)  /* one setting of the tone playing */
 {
     uint8_t v[4];
-    tone_get(v);
+    tone_rec_t *t = tone_own();
+    v[0] = t->v[0]; v[1] = t->v[1]; v[2] = t->v[2]; v[3] = t->v[3];
     v[k] = (uint8_t)(value > tmax[k] ? tmax[k] : value);
-    trec[tidx()].crc = nam_current_crc();
-    for (unsigned i = 0; i < 4; i++) trec[tidx()].v[i] = v[i];
+    for (unsigned i = 0; i < 4; i++) t->v[i] = v[i];
     nam_tone(v[0], v[1], v[2], v[3]);
     tone_params(v);
-    save_due = ticks + SAVE_TICKS; if (!save_due) save_due = 1;
+    save_soon();
 }
 static void tone_load(void)
 {
-    unsigned i;
-    if (gp5_store_load(STORE_TONE, trec, sizeof trec) != sizeof trec) for (i = 0; i <= NAM_SLOTS; i++) trec[i].crc = 0;
-    tone_key = 1;                                    /* applied on the next tick */
+    static tone_rec12_t old[13];
+    unsigned i, n = gp5_store_load(STORE_TONE, trec, sizeof trec);
+    if (n == sizeof trec) { tone_key = 1; return; }  /* applied on the next tick */
+    for (i = 0; i <= NAM_SLOTS; i++) { trec[i].crc = 0; trec[i].ir = 0; }
+    if (n == sizeof old && gp5_store_load(STORE_TONE, old, sizeof old) == sizeof old)   /* saved by 1.2: kept */
+        for (i = 0; i < 13; i++) {
+            tone_rec_t *t = &trec[i < 12 ? i : NAM_SLOTS];
+            t->crc = old[i].crc; t->v[0] = old[i].v[0]; t->v[1] = old[i].v[1]; t->v[2] = old[i].v[2]; t->v[3] = old[i].v[3];
+        }
+    tone_key = 1;
 }
 
 static void save_slot(int s) { int32_t v = s; gp5_store_save(STORE_ID, &v, sizeof v); }
@@ -115,6 +154,7 @@ void fw_param_changed(unsigned id)
     if (id == GP5_P_CAB) nam_cab(gp5_param(GP5_P_CAB) != 0);
     if (id == GP5_P_TAPS) nam_cab_limit((unsigned)gp5_param(GP5_P_TAPS));
     if (id >= GP5_P_GATE && id <= GP5_P_TREBLE) tone_change(id - GP5_P_GATE, (unsigned)gp5_param(id));
+    if (id == GP5_P_IR) ir_choose((int)gp5_param(GP5_P_IR) - 1);
 }
 int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB", "all", "512 taps" */
 {
@@ -123,6 +163,11 @@ int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB",
     if (id == GP5_P_TAPS) {
         if (!v) { t[0] = 'a'; t[1] = 'l'; t[2] = 'l'; t[3] = 0; return 1; }
         gp5_fmt(t, 16, "%ld taps", (long)v); return 1;
+    }
+    if (id == GP5_P_IR) {                            /* "none", or the IR's name (15 characters at most) */
+        const char *s = v > 0 && nam_ir_ok((int)v - 1) ? nam_ir_name((int)v - 1) : "none";
+        for (n = 0; n < 15 && s[n]; n++) t[n] = s[n];
+        t[n] = 0; return 1;
     }
     if (id == GP5_P_GATE && !v) { t[0] = 'O'; t[1] = 'f'; t[2] = 'f'; t[3] = 0; return 1; }
     if (id < GP5_P_GATE || id > GP5_P_TREBLE) return 0;
@@ -135,10 +180,22 @@ int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB",
 }
 
 /* PARA: a click (let go before 0.6 s); a hold opens or closes the TONE page (the platform tells them apart) */
+static int list_len(void) { return blist ? (int)NAM_IRS + 1 : (int)NAM_SLOTS; }
 void fw_para_click(void)
 {
     if (editing) { adjusting ^= 1u; edit_until = ticks + EDIT_TICKS; return; }
-    if (!browsing) { browsing = 1; cursor = nam_current() < 0 ? 0 : nam_current(); browse_until = ticks + BROWSE_TICKS; return; }
+    if (!browsing) {                                 /* the list of the page shown, at the one playing */
+        browsing = 1; blist = page;
+        cursor = blist ? nam_ir_current() + 1 : (nam_current() < 0 ? 0 : nam_current());
+        browse_until = ticks + BROWSE_TICKS; return;
+    }
+    if (blist) {                                     /* row 0: NONE; row r: IR r */
+        if (cursor > 0 && !nam_ir_ok(cursor - 1)) { show_empty_until = ticks + 100u; browse_until = ticks + BROWSE_TICKS; return; }
+        ir_choose(cursor - 1);
+        if (cursor > 0 && !nam_cab_is_on()) { nam_cab(1); gp5_param_set(GP5_P_CAB, 1); }   /* an IR picked: heard */
+        browsing = 0;
+        return;
+    }
     if (!nam_slot_ok(cursor)) { show_empty_until = ticks + 100u; browse_until = ticks + BROWSE_TICKS; return; }
     choose(cursor);
     browsing = 0;
@@ -156,8 +213,8 @@ void fw_para_turn(int detents)
         } else edit_row = (unsigned)(((int)edit_row + detents) % 4 + 4) % 4;
         return;
     }
-    if (!browsing) { browsing = 1; cursor = nam_current() < 0 ? 0 : nam_current(); }
-    else cursor = ((cursor + detents) % NAM_SLOTS + NAM_SLOTS) % NAM_SLOTS;
+    if (!browsing) { page = (unsigned)(((int)page + detents) % 2 + 2) % 2; return; }   /* NAM <-> CAB */
+    cursor = ((cursor + detents) % list_len() + list_len()) % list_len();
     browse_until = ticks + BROWSE_TICKS;
 }
 void fw_tick(void)                                   /* every 10 ms: the clock for this file */
@@ -170,6 +227,8 @@ void fw_tick(void)                                   /* every 10 ms: the clock f
     got = nam_poll();
     if (got >= 0) { save_slot(got); browsing = 0; loading_until = ticks + LOADING_MIN; }   /* an upload landed */
     if (nam_current_crc() != tone_key && !nam_busy()) tone_apply();       /* another capture: its settings */
+    if (!nam_busy() && ir_want() != nam_ir_current()) nam_ir_select(ir_want());   /* its IR (or one just uploaded) */
+    if (gp5_param(GP5_P_IR) != nam_ir_current() + 1) gp5_param_set(GP5_P_IR, nam_ir_current() + 1);
     if (save_due && (int)(ticks - save_due) >= 0) { save_due = 0; gp5_store_save(STORE_TONE, trec, sizeof trec); }
 }
 
@@ -192,7 +251,7 @@ static void num2(char *p, int v) { p[0] = (char)('0' + v / 10 % 10); p[1] = (cha
 
 static void draw_head(unsigned mode)                 /* mode: 0 play, 1 bypass, 2 loading, 3 browse, 4 tone */
 {
-    char r[10] = "00 / 12", l[12] = "LOADING 00";
+    char r[10] = "00 / 00", l[12] = "LOADING 00";
     const gp5_font_t *f = &gp5_font_sans_12;
     bh = HEAD_H; fill(BG);
     if (mode == 4) {
@@ -200,25 +259,42 @@ static void draw_head(unsigned mode)                 /* mode: 0 play, 1 bypass, 
         text(MARGIN, 12, f, "TONE", YELLOW);
         text(W - MARGIN - gp5_text_width(f, h), 12, f, h, DIM);
     } else if (mode == 3) {
-        text(MARGIN, 12, f, "BANK", YELLOW);
-        text(W - MARGIN - gp5_text_width(f, "push to load"), 12, f, "push to load", DIM);
+        const char *h = blist ? "push to choose" : "push to load";
+        text(MARGIN, 12, f, blist ? "CABS" : "BANK", YELLOW);
+        text(W - MARGIN - gp5_text_width(f, h), 12, f, h, DIM);
     } else {
-        int s = nam_current();
-        if (mode == 2) { num2(l + 8, s + 1); text(MARGIN, 12, f, s < 0 ? "LOADING" : l, YELLOW); }
-        else text(MARGIN, 12, f, mode == 1 ? "BYPASS" : "AMP", mode == 1 ? DIM : YELLOW);
-        if (s < 0) text(W - MARGIN - gp5_text_width(f, "built-in"), 12, f, "built-in", DIM);
-        else { num2(r, s + 1); num2(r + 5, NAM_SLOTS); text(W - MARGIN - gp5_text_width(f, r), 12, f, r, DIM); }
+        int s = page ? nam_ir_current() : nam_current(), x;
+        const char *lab = mode == 1 ? "BYPASS" : page ? "CAB" : "NAM";
+        if (mode == 2) { num2(l + 8, nam_current() + 1); text(MARGIN, 12, f, nam_current() < 0 ? "LOADING" : l, YELLOW); }
+        else {
+            x = text(MARGIN, 12, f, lab, mode == 1 ? DIM : YELLOW);
+            if (mode == 0) {                         /* the page: two dots, this one lit (turn PARA for the other) */
+                box(x + 6, 6, 4, 4, page ? TRACK : YELLOW); box(x + 12, 6, 4, 4, page ? YELLOW : TRACK);
+            }
+        }
+        if (s < 0) { const char *e = page ? "none" : "built-in"; text(W - MARGIN - gp5_text_width(f, e), 12, f, e, DIM); }
+        else { num2(r, s + 1); num2(r + 5, page ? (int)NAM_IRS : NAM_SLOTS); text(W - MARGIN - gp5_text_width(f, r), 12, f, r, DIM); }
     }
     gp5_blit(0, 0, W, HEAD_H, band);
 }
 
-/* the name, large, at offset `off` pixels to the left (scrolling) */
-static void draw_name(const char *s, int off, rgb_t c)
+/* the name, large, at offset `off` pixels to the left (scrolling). Drawn and sent in NAME_STRIPS strips, one per
+ * main-loop pass: the whole area at once (14 KB to the screen) made passes of 13-18 ms, during which USB waited.
+ * A frame (name, offset, colour) is finished before the next one starts, so a strip never shows another offset. */
+#define NAME_STRIPS 4u
+#define STRIP_ROWS (NAME_H / NAME_STRIPS)
+static struct { const char *s; int off; rgb_t c; unsigned next; } nf = { 0, 0, { 0, 0, 0 }, NAME_STRIPS };
+static void name_frame(const char *s, int off, rgb_t c) { nf.s = s; nf.off = off; nf.c = c; nf.next = 0; }
+static int name_strip(void)                          /* the next strip of the frame; 1 while more are left */
 {
-    bh = NAME_H; fill(BG);
-    text(MARGIN - off, 34, &gp5_font_sans_32, s, c);
-    box(0, 0, MARGIN, NAME_H, BG); box(W - MARGIN, 0, MARGIN, NAME_H, BG);   /* framed by the margins */
-    gp5_blit(0, NAME_Y, W, NAME_H, band);
+    unsigned k = nf.next;
+    if (k >= NAME_STRIPS) return 0;
+    bh = STRIP_ROWS; fill(BG);
+    gp5_draw_text(band, W, STRIP_ROWS, MARGIN - nf.off, 34 - (int)gp5_font_sans_32.base - (int)(k * STRIP_ROWS),
+                  &gp5_font_sans_32, nf.s, rgb(nf.c));
+    box(0, 0, MARGIN, STRIP_ROWS, BG); box(W - MARGIN, 0, MARGIN, STRIP_ROWS, BG);   /* framed by the margins */
+    gp5_blit(0, NAME_Y + k * STRIP_ROWS, W, STRIP_ROWS, band);
+    return ++nf.next < NAME_STRIPS;
 }
 
 /* where a scrolling name is: pause, slide (eased), pause, slide back; 0 when it fits */
@@ -265,24 +341,41 @@ static void draw_foot(unsigned mode)
 }
 
 /* the bank: three rows around the cursor, the highlighted one filled */
-static void draw_rows(void)
+/* the bank: three rows (the one picked in the middle) and the row of background below them, drawn and sent one per
+ * main-loop pass (all at once was 20 KB to the screen in one pass). A frame is drawn for the cursor it started with. */
+static struct { int cursor; unsigned next; } bf = { 0, 4u };
+static void row_cap(int s, const char **name, int *ok, int *playing)
 {
-    static uint16_t rows[W * (GP5_SCREEN_H - HEAD_H)];
-    int k;
-    for (k = 0; k < 3; k++) {
-        int s = (cursor + k - 1 + NAM_SLOTS) % NAM_SLOTS, hl = k == 1;
+    *ok = nam_slot_ok(s); *name = *ok ? nam_slot_name(s) : "empty"; *playing = s == nam_current();
+}
+static void row_ir(int r, const char **name, int *ok, int *playing)   /* row 0: NONE; row r: IR r */
+{
+    *ok = r == 0 || nam_ir_ok(r - 1);
+    *name = r == 0 ? "none" : *ok ? nam_ir_name(r - 1) : "empty";
+    *playing = r == nam_ir_current() + 1;
+}
+static int bank_row(void)                            /* the next row of the frame; 1 while more are left */
+{
+    unsigned k = bf.next;
+    if (k >= 4u) return 0;
+    if (k < 3u) {
+        int len = list_len(), s = (bf.cursor + (int)k - 1 + len) % len, hl = k == 1u, ok, playing;
         char n[4] = "00 ";
-        const char *name = nam_slot_ok(s) ? nam_slot_name(s) : ((int)(ticks - show_empty_until) < 0 && hl ? "nothing to load" : "empty");
+        const char *name;
+        if (blist) row_ir(s, &name, &ok, &playing); else row_cap(s, &name, &ok, &playing);
+        if (!ok && hl && (int)(ticks - show_empty_until) < 0) name = "nothing to load";
         bh = ROW_H; fill(hl ? YELLOW : BG);
-        num2(n, s + 1);
+        if (blist && s == 0) { n[0] = '-'; n[1] = '-'; } else num2(n, blist ? s : s + 1);
         text(MARGIN, 16, &gp5_font_sans_16, n, hl ? ONYEL : DIM);
-        text(MARGIN + 26, 16, &gp5_font_sans_16, name, hl ? ONYEL : (nam_slot_ok(s) ? INK : GHOST));
+        text(MARGIN + 26, 16, &gp5_font_sans_16, name, hl ? ONYEL : (ok ? INK : GHOST));
         box(W - MARGIN - 12, 0, MARGIN + 12, ROW_H, hl ? YELLOW : BG);           /* long names end before the dot */
-        if (s == nam_current()) box(W - MARGIN - 5, 8, 5, 5, hl ? ONYEL : YELLOW);   /* the one playing */
-        {   unsigned i; for (i = 0; i < W * ROW_H; i++) rows[(unsigned)k * W * ROW_H + i] = band[i]; }
+        if (playing) box(W - MARGIN - 5, 8, 5, 5, hl ? ONYEL : YELLOW);   /* the one playing */
+        gp5_blit(0, HEAD_H + k * ROW_H, W, ROW_H, band);
+    } else {                                                                      /* the row left at the bottom */
+        bh = GP5_SCREEN_H - HEAD_H - 3u * ROW_H; fill(BG);
+        gp5_blit(0, HEAD_H + 3u * ROW_H, W, bh, band);
     }
-    for (k = 3 * W * ROW_H; k < W * (GP5_SCREEN_H - HEAD_H); k++) rows[k] = gp5_color(rgb(BG));   /* the row left at the bottom */
-    gp5_blit(0, HEAD_H, W, GP5_SCREEN_H - HEAD_H, rows);
+    return ++bf.next < 4u;
 }
 
 /* the TONE page: GATE, BASS, MID, TREBLE of the capture playing, a row each (16 px), drawn one at a time */
@@ -321,11 +414,14 @@ int fw_draw(int force)
     static unsigned name_t0;                         /* a new name starts its scrolling from the start */
     static uint32_t sh_tone = 0xFFFFFFFFu;
     unsigned mode = editing ? 4u : browsing ? 3u : (nam_busy() || (int)(ticks - loading_until) < 0) ? 2u : nam_bypass ? 1u : 0u;
-    unsigned cur = (unsigned)(nam_current() + 1), emp = (int)(ticks - show_empty_until) < 0;
+    unsigned cur = (unsigned)(nam_current() + 1) | (unsigned)(nam_ir_current() + 1) << 8 | page << 16 | blist << 17 | (unsigned)nam_cab_is_on() << 18,
+             emp = (int)(ticks - show_empty_until) < 0;
     if (force || mode != sh_mode || cur != sh_cur) {
         if (cur != sh_cur || mode == 2) name_t0 = ticks;
         draw_head(mode); sh_mode = mode; sh_cur = cur;
         sh_off = -1; sh_cursor = 99; sh_tone = 0xFFFFFFFFu;   /* the rest follows on the next passes */
+        nf.next = NAME_STRIPS;                       /* (a name frame half sent is started again) */
+        bf.next = 4u;                                /* (and a bank frame) */
         return 1;
     }
     if (mode == 4) {                                 /* the TONE page: a changed row redrawn per pass */
@@ -341,13 +437,16 @@ int fw_draw(int force)
         return 0;
     }
     if (mode == 3) {
-        if ((unsigned)cursor != sh_cursor || emp != sh_emp) { draw_rows(); sh_cursor = (unsigned)cursor; sh_emp = emp; }
+        if (bf.next < 4u) return bank_row();         /* the frame on its way first */
+        if ((unsigned)cursor != sh_cursor || emp != sh_emp) { bf.cursor = cursor; bf.next = 0; sh_cursor = (unsigned)cursor; sh_emp = emp; return bank_row(); }
         return 0;
     }
     if (part++ & 1u) {                               /* name and footer take turns */
-        const char *n = nam_name();
+        const char *n = page ? (nam_ir_current() >= 0 ? nam_ir_name(nam_ir_current()) : "no IR") : nam_name();
         int off = scroll_off(n, ticks - name_t0);
-        if (off != sh_off) { draw_name(n, off, mode == 1 ? GHOST : INK); sh_off = off; }
+        rgb_t c = mode == 1 || (page && (nam_ir_current() < 0 || !nam_cab_is_on())) ? GHOST : INK;   /* not heard: grey */
+        if (nf.next < NAME_STRIPS) return name_strip();   /* the frame on its way first (more to do: say so) */
+        if (off != sh_off) { name_frame(n, off, c); sh_off = off; return name_strip(); }
     } else if (ticks - sh_foot >= 3u) {              /* ~30 times a second */
         draw_foot(mode); sh_foot = ticks;
     }

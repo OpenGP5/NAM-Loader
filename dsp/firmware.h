@@ -69,7 +69,7 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
     int32_t *lo = gp5_link_out();                  /* goes out at the start of the next block */
     int ok = (uint32_t)li[0] == MAGIC_N;
     if ((uint32_t)li[0] == MAGIC_W) take_piece(li);
-    uint32_t flags = ok ? (uint32_t)li[LW_FLAGS] : 0, i, t0 = *(volatile uint32_t *)0xE0001004u;   /* cycle counter */
+    uint32_t flags = ok ? (uint32_t)li[LW_FLAGS] : 0, i, t0 = GP5_CYCLE_COUNT();
     int have = 0;
     {
         int bad = !ok;
@@ -112,7 +112,7 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
     lo[LW_TAG] = (int32_t)blk;
     lo[LW_DSPCRC] = (int32_t)have_crc;
     lo[0] = (int32_t)MAGIC_D;
-    cyc = *(volatile uint32_t *)0xE0001004u - t0;
+    cyc = GP5_CYCLE_COUNT() - t0;
     if (cyc > worst && blk > 100u) worst = cyc;
     if (cyc > NAM_DSP_SLOW) slow++;                            /* over 95 %: at 50 its layers stop (silent) */
     lo[LW_DSPCYC] = (int32_t)cyc;

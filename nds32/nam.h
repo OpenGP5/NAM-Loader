@@ -14,6 +14,10 @@ const char *nam_name(void);            /* the capture playing */
 int nam_busy(void);                    /* switching */
 unsigned nam_progress(void);           /* 0..255 through a switch */
 unsigned nam_take_peak(void);          /* the largest input sample since the last call, 0..2^31 */
+int nam_ir_ok(int i);                  /* IR i (0..NAM_IRS-1, file "cab-NN") is there */
+const char *nam_ir_name(int i);        /* its name ("IR NN" when it has none) */
+void nam_ir_select(int i);             /* the IR to play (-1: none); main loop */
+int nam_ir_current(void);              /* the IR chosen (-1: none) */
 void nam_cab(int on);                  /* the cab IR on / off (live setting 0) */
 int nam_cab_is_on(void);
 void nam_cab_limit(unsigned taps);     /* at most this many taps of the IR file, 0 = all (live setting 1) */

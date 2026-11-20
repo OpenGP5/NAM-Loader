@@ -52,7 +52,10 @@
 #define LW_W_DATA  5
 #define LW_W_MAX   256
 
-/* The capture bank (old fixed layout, before storage files): NAM_SLOTS slots of NAM_SLOT_BYTES in the data area. */
-#define NAM_SLOTS      12
+/* The capture bank: NAM_SLOTS storage files "tone-01".. (2 sectors each: a capture is kept exactly as converted),
+ * and NAM_IRS cab IRs "cab-01".. (1 sector each in the 16-bit format), chosen per capture (1.3; before: 12 slots,
+ * each with its own IR). 30 x 2 + 12 = 72 of the 73 storage sectors. NAM_SLOT_BYTES: the largest capture. */
+#define NAM_SLOTS      30
+#define NAM_IRS        12
 #define NAM_SLOT_BYTES 4608u
 #endif

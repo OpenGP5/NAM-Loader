@@ -8,9 +8,9 @@
  * link, and the output fades in (NAM_FADE_IN blocks: this also covers the DSP's layers starting from silence). A
  * capture written into a slot while this runs is picked up within a moment and played.
  *
- * Cab IR, one per tone: the storage file "cab-NN" goes with tone slot NN, "cab" with the built-in capture (format
- * below; OpenGP5 Launchpad writes them). Played while the cab is on (live setting 0, USB 7E 10; on by default).
- * Read when a capture is loaded and re-read when the file changes. */
+ * Cab IRs: a bank of NAM_IRS storage files "cab-NN" (format below; OpenGP5 Launchpad writes them); each tone plays
+ * the one chosen for it (firmware.c), or none. Played while the cab is on (live setting 0, USB 7E 10; on by default).
+ * Read when chosen and re-read when the file changes. */
 #pragma GCC optimize("O2")
 #include <stdint.h>
 #include <nds32_intrinsic.h>
@@ -78,40 +78,90 @@ static const uint8_t *slot_at(int i, unsigned *max)
     const uint8_t *p;
     name[5] = (char)('0' + (i + 1) / 10); name[6] = (char)('0' + (i + 1) % 10);
     if ((p = gp5_file(NAM_FIRM, name, &len))) { *max = len; return p; }
-    *max = NAM_SLOT_BYTES;
-    return GP5_DATA + (uint32_t)i * NAM_SLOT_BYTES;   /* (a sector a file now uses fails the capture's own checks) */
+    *max = 0;
+    return 0;                                         /* no capture in this slot */
 }
 
-/* A cab file: [0] "CAB1", [1] taps, [2] sample rate (48000), [3] reserved, then taps x float32 (little endian; the
- * gain is the file's: Launchpad sets its loudest frequency to 0 dB), then (Launchpad) its name, 32 bytes UTF-8.
- * Main loop: (re)load the playing tone's when it changed. */
+/* A cab file "cab-NN" (NN = 01..NAM_IRS), written by Launchpad. Two formats, both read:
+ *   "CAB1": [0] magic, [1] taps, [2] sample rate (48000), [3] reserved, then taps x float32 (1.1 .. 1.2)
+ *   "CAB2": [0] magic, [1] taps, [2] sample rate, [3] scale (float32), then taps x int16 (tap = value x scale), padded
+ *           to 4 bytes (1.3: one sector; cabq.h plays the IR in 16 bits anyway)
+ * then (Launchpad) its name, 32 bytes UTF-8. The gain is the file's: Launchpad sets its loudest frequency to 0 dB.
+ * Any tone plays any IR: firmware.c chooses (nam_ir_select); main loop. */
 #define CAB_MAGIC 0x31424143u                        /* "CAB1" */
-static void cab_name(char *n)                       /* "cab-NN" for tone slot NN, "cab" for the built-in capture */
+#define CAB2_MAGIC 0x32424143u                       /* "CAB2" */
+static int ir_cur = -1;                              /* the IR chosen (-1: none) */
+static uint8_t ir_ok[NAM_IRS];
+static char ir_name[NAM_IRS][33];
+static float ir_taps[CABQ_MAX_TAPS];                 /* a CAB2 file's taps as float, for cabq_set */
+static void ir_file(int i, char *n)                  /* "cab-NN" */
 {
-    if (cur >= 0) { n[0] = 'c'; n[1] = 'a'; n[2] = 'b'; n[3] = '-'; n[4] = (char)('0' + (cur + 1) / 10); n[5] = (char)('0' + (cur + 1) % 10); n[6] = 0; }
-    else { n[0] = 'c'; n[1] = 'a'; n[2] = 'b'; n[3] = 0; }
+    n[0] = 'c'; n[1] = 'a'; n[2] = 'b'; n[3] = '-'; n[4] = (char)('0' + (i + 1) / 10); n[5] = (char)('0' + (i + 1) % 10); n[6] = 0;
+}
+static uint32_t ir_bytes(const uint32_t *w)          /* the taps' bytes in a file of either format (0: neither) */
+{
+    if (w[0] == CAB_MAGIC) return 4u * w[1];
+    if (w[0] == CAB2_MAGIC) return (2u * w[1] + 3u) & ~3u;
+    return 0;
+}
+static const uint32_t *ir_at(int i, uint32_t *len)   /* IR i's file when its header makes sense, else 0 */
+{
+    char name[8];
+    const uint8_t *f;
+    const uint32_t *w;
+    ir_file(i, name);
+    f = gp5_file(NAM_FIRM, name, len);
+    w = (const uint32_t *)f;
+    if (!f || *len < 16u || ((uintptr_t)f & 3u) || w[1] == 0 || w[1] > CABQ_MAX_TAPS || !ir_bytes(w) ||
+        16u + ir_bytes(w) > *len) return 0;
+    return w;
+}
+static void scan_ir(int i)                           /* is it there, and its name (for the screen) */
+{
+    uint32_t len = 0, k, n = 0;
+    const uint32_t *w = ir_at(i, &len);
+    ir_ok[i] = w != 0;
+    if (w) {
+        const uint8_t *s = (const uint8_t *)w + 16u + ir_bytes(w);
+        uint32_t room = len - 16u - ir_bytes(w);
+        for (k = 0; k < 32u && k < room && s[k]; k++) {
+            if (s[k] >= 0x80u && s[k] < 0xC0u) continue;   /* UTF-8: one ? for each character this font lacks */
+            ir_name[i][n++] = s[k] < 0x80u ? (char)s[k] : '?';
+        }
+    }
+    if (!n) { ir_name[i][0] = 'I'; ir_name[i][1] = 'R'; ir_name[i][2] = ' '; ir_name[i][3] = (char)('0' + (i + 1) / 10);
+              ir_name[i][4] = (char)('0' + (i + 1) % 10); n = 5; }
+    ir_name[i][n] = 0;
 }
 static void cab_check(void)
 {
     uint32_t len = 0;
     char name[8];
-    const uint8_t *f;
-    cab_name(name);
-    f = gp5_file(NAM_FIRM, name, &len);
-    const uint32_t *w = (const uint32_t *)f;
-    if (f == cab_seen && len == cab_seen_len) return;
+    const uint32_t *w = 0;
+    if (ir_cur >= 0) { w = ir_at(ir_cur, &len); ir_file(ir_cur, name); }
+    if ((const uint8_t *)w == cab_seen && len == cab_seen_len) return;
     cab_ready = 0;                                    /* the interrupt stops using it (plays the model dry) */
-    cab_seen = f; cab_seen_len = len; nam_cab_taps = 0;
-    if (!f || len < 16u || ((uint32_t)f & 3u) || w[0] != CAB_MAGIC || w[1] == 0 || w[1] > CABQ_MAX_TAPS ||
-        16u + 4u * w[1] > len || !gp5_file_check(NAM_FIRM, name)) { cabq_set(&cab, 0, 0); return; }
+    cab_seen = (const uint8_t *)w; cab_seen_len = len; nam_cab_taps = 0;
+    if (!w || !gp5_file_check(NAM_FIRM, name)) { cabq_set(&cab, 0, 0); return; }
     {
-        uint32_t n = w[1];
+        uint32_t n = w[1], k;
+        const float *h = (const float *)(w + 4);
         if (cab_limit && n > cab_limit) n = cab_limit;
-        cabq_set(&cab, (const float *)(w + 4), (int)n);
+        if (w[0] == CAB2_MAGIC) {
+            const int16_t *q = (const int16_t *)(w + 4);
+            union { uint32_t u; float f; } sc = { w[3] };
+            for (k = 0; k < n; k++) ir_taps[k] = (float)q[k] * sc.f;
+            h = ir_taps;
+        }
+        cabq_set(&cab, h, (int)n);
         nam_cab_taps = n;
     }
     cab_ready = 1;
 }
+int nam_ir_ok(int i) { return i >= 0 && i < NAM_IRS && ir_ok[i]; }
+const char *nam_ir_name(int i) { return i >= 0 && i < NAM_IRS ? ir_name[i] : ""; }
+int nam_ir_current(void) { return ir_cur; }
+void nam_ir_select(int i) { ir_cur = i >= 0 && i < NAM_IRS ? i : -1; cab_check(); }
 void nam_cab(int on) { cab_on = on ? 1u : 0u; cab_auto_off = 0; }
 void nam_cab_limit(unsigned taps) { cab_limit = taps; cab_seen = 0; cab_seen_len = 0; cab_check(); }   /* reload */
 unsigned nam_cab_get_limit(void) { return cab_limit; }
@@ -277,19 +327,26 @@ void nam_select(int slot)
     if (st == ST_PLAY) st = gain ? ST_FADE : ST_LOAD;
 }
 
-/* main loop (fw_knob, every 10 ms): a pending load; new captures in the bank; the cab file about once a second */
+/* main loop (fw_knob, every 10 ms): a pending load; new captures and IRs in the bank; the IR's file about once a second */
 int nam_poll(void)
 {
     static unsigned tick;
     int got = -1;
-    if (st == ST_LOAD) { load(); st = ST_SEND; cab_check(); }   /* the new tone's cab */
+    if (st == ST_LOAD) { load(); st = ST_SEND; }     /* (the new tone's IR: firmware.c chooses it) */
     else if (st == ST_PLAY && want != cur) st = gain ? ST_FADE : ST_LOAD;   /* chosen during a switch */
-    {   /* one slot per call (every 10 ms): finding a file reads 47 headers */
+    /* one file looked up per call (every 10 ms): finding one checks every storage header, more of them with a full
+     * bank (30 captures + 12 IRs). In turn: a capture slot, an IR (its name for the screen); once a second the IR
+     * playing instead (re-read when its file changed). */
+    if (++tick % 100u == 50u) cab_check();
+    else if (tick & 1u) {
+        static int nir;
+        scan_ir(nir);
+        nir = (nir + 1) % NAM_IRS;
+    } else {
         static int next;
         if (scan_slot(next)) got = next;
         next = (next + 1) % NAM_SLOTS;
     }
-    if (++tick % 100u == 0) cab_check();
     if (got >= 0) { nam_select(got); return got; }    /* just uploaded: play it */
     return -2;
 }
@@ -305,10 +362,10 @@ void nam_start(int slot)
     cabq_set(&cab, 0, 0);
     tone_init(&tone);
     for (i = 0; i < NAM_SLOTS; i++) scan_slot(i);
+    for (i = 0; i < NAM_IRS; i++) scan_ir(i);
     if (!nam_slot_ok(slot)) for (slot = -1, i = 0; i < NAM_SLOTS && slot < 0; i++) if (slot_ok[i]) slot = i;
     want = slot;
-    load();
-    cab_check();                                      /* its cab */
+    load();                                           /* (its IR: firmware.c chooses it) */
     st = ST_SEND; gain = 0;
     gp5_link_start(on_block);
 }
