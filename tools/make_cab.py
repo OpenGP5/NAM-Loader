@@ -13,8 +13,10 @@ ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDe
 ap.add_argument('wav'); ap.add_argument('out'); ap.add_argument('--taps', type=int, default=1024)
 a = ap.parse_args()
 
-LOUDNESS_DB = -6.0   # the middle of 51 IRs from five packs when only their peak was set (they spread over 3.4 dB)
-PEAK_MAX_DB = 2.0    # unit energy put the Orange 4x12 at +13 dB at 129 Hz and the pedal clipped; this stays far below
+LOUDNESS_DB = 2.8    # since 1.4: a capture plays about as loud through the IR as without one (Normalize levels it before
+                     # the IR; at -6 dB the IR took 7-12 dB off amp captures). 5 captures x 3 IRs: median loss 8.8 dB
+PEAK_MAX_DB = 14.0   # the loudest frequency's limit (2 dB before Normalize capped captures' peaks at -3 dBFS); peaks after
+                     # the IR stay at -4.8 dBFS or below for hard playing
 
 def weight(f):
     """A rough hearing weight for a guitar through a cab: K-weighting (BS.1770 shelf + high-pass, analog form), a pink

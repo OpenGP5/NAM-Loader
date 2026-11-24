@@ -19,7 +19,7 @@
 
 NAM Loader plays [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler) A2 captures on the pedal
 itself, at 48 kHz, the rate captures are trained at. It holds **30 captures** and **12 cab IRs**. Any capture can
-play any IR, or none, and each capture keeps its own IR choice, noise gate and 3-band EQ.
+play any IR, or none, and each capture keeps its own IR choice, input and output level, noise gate and 3-band EQ.
 
 The pedal runs the capture's own network, every layer and every weight, unchanged. It's computed in fixed point
 (16-bit weights, a 32-bit signal through the network), because the pedal's processors are too slow at floating
@@ -51,7 +51,7 @@ which page you're on.
 |---|---|
 | **Turn PARA** | Switch between the NAM and CAB pages. In a list: move through it |
 | **Push PARA** | On NAM: the 30 capture slots. On CAB: the IRs, with NONE. In a list: load the highlighted one |
-| **Hold PARA** | The TONE page: gate, bass, mid and treble of the capture playing |
+| **Hold PARA** | The TONE page of the capture playing: input level, gate, bass, mid, treble and output level |
 | **Foot switch** | Bypass |
 | **Volume knob** | Output level |
 
@@ -123,7 +123,7 @@ The model is split across both of the pedal's processors: the DSP runs the first
 | `dsp/firmware.h` | The DSP's layers, the bypass and the dry signal |
 | `tone.h` | The noise gate and the 3-band EQ, in fixed point |
 | `cab/cabq.h` | The cab IR: a fixed-point partitioned FFT convolver |
-| `firmware.json`, `params.h` | Who it is (OpenGP5 1.0) and its parameters: cab IR, taps, gate, bass, mid, treble, the IR chosen, the capture playing |
+| `firmware.json`, `params.h` | Who it is (OpenGP5 1.0) and its parameters: cab IR, taps, gate, bass, mid, treble, the IR chosen, the capture playing, output and input level |
 | `default_capture.inc` | The built-in capture (see `CAPTURE-LICENSE.txt`) |
 | `tools/a2r_export.py` | Converts a `.nam` file into a capture file, with Calibrate and Normalize (`--no-calibration`, `--no-level`); needs numpy and soundfile |
 | `tools/make_cab.py` | Converts a `.wav` IR into a cab file (the older float format, which the pedal still plays); needs numpy, soundfile and scipy |
