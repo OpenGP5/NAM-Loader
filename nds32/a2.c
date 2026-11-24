@@ -53,6 +53,12 @@ static int32_t ymine[A2R_BLOCK];
 static tone_t tone;
 _Static_assert(NAM_GATE_MAX == TONE_GATE_MAX && NAM_EQ_MAX == TONE_EQ_MAX && NAM_EQ_FLAT == TONE_EQ_FLAT, "nam.h and tone.h ranges");
 void nam_tone(uint8_t gate, uint8_t bass, uint8_t mid, uint8_t treble) { tone_set(&tone, (tone_set_t){ gate, bass, mid, treble }); }
+static volatile int32_t out_q16 = 65536;             /* the output level (1.4), Q16; one word: the interrupt sees old or new */
+void nam_out_level(uint8_t v)
+{
+    float db = ((float)v - 24.0f) * 0.5f;
+    out_q16 = (int32_t)(65536.0f * expf(db * 0.115129255f) + 0.5f);   /* 10^(db/20) */
+}
 
 /* the cab IR */
 static cabq_t cab;
@@ -267,7 +273,14 @@ static void on_block(const int32_t *in, int32_t *out)
     } else {
         for (i = 0; i < A2R_BLOCK; i++) out[LW_Y + i] = ys[i];
     }
-    tone_eq(&tone, out + LW_Y, A2R_BLOCK);               /* the EQ, last */
+    tone_eq(&tone, out + LW_Y, A2R_BLOCK);               /* the EQ */
+    if (out_q16 != 65536) {                              /* the output level (1.4), saturating */
+        int32_t g = out_q16;
+        for (i = 0; i < A2R_BLOCK; i++) {
+            int64_t v = ((int64_t)out[LW_Y + i] * g) >> 16;
+            out[LW_Y + i] = v > 0x7FFFFFFF ? 0x7FFFFFFF : v < -0x7FFFFFFF ? -0x7FFFFFFF : (int32_t)v;
+        }
+    }
     {   /* the output (after the IR, the gate and the EQ), metered */
         uint32_t po = nam_lv[2];
         for (i = 0; i < A2R_BLOCK; i++) {

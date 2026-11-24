@@ -14,6 +14,7 @@
  * ../firmware.json (OpenGP5 1.0). */
 #define NAM_DSP_SLOW (191900000u / GP5_SAMPLE_RATE * 64u * 95u / 100u)   /* 95 % of a block, core cycles */
 
+#include "gp5_math.h"                     /* expf (the input level) */
 #include "../split.h"
 #include "../pack24.h"
 #include "../kernel/a2r.c"
@@ -31,8 +32,16 @@ static uint32_t ctl_cyc, ctl_worst;              /* the control processor's cycl
 static uint32_t cabw[5];                          /* the cab IR's cycles and state (LW_CAB), for 0x7F33 */
 static uint32_t d_notok, d_dup, d_skip, d_since, d_gi, d_gap[8];
 
-/* its parameters (../params.h) are all the control processor's: nothing to do here */
-static void fw_param(uint32_t id, int32_t value) { (void)id; (void)value; }
+/* its parameters (../params.h) are the control processor's, but INPUT (1.4): the input level before the model, Q16
+ * (0..36 = -12..+6 dB in 0.5 dB steps; the model's ranges keep 12 dB of headroom and its sums saturate) */
+static volatile int32_t in_q16 = 65536;
+static void fw_param(uint32_t id, int32_t value)
+{
+    if (id == GP5_P_INPUT) {
+        float db = ((float)value - 24.0f) * 0.5f;
+        in_q16 = (int32_t)(65536.0f * expf(db * 0.115129255f) + 0.5f);
+    }
+}
 
 static void fw_init(void)
 {
@@ -95,12 +104,23 @@ static void fw_process(const int32_t *in, int32_t *out_left, int32_t *out_right)
     }
     /* this block's input through layers 0..A2_SPLIT-1, for the control processor, packed (pack24.h) */
     {
-        static int32_t xs[GP5_BLOCK * 3], ys[GP5_BLOCK];
-        unsigned su = p24_shift(in, GP5_BLOCK, 0, 1), sx[3] = { 0, 0, 0 }, sy = 0;
-        p24_pack(in, GP5_BLOCK, &su, 1, &lo[LW_U]);
+        static int32_t xs[GP5_BLOCK * 3], ys[GP5_BLOCK], ui[GP5_BLOCK];
+        const int32_t *u = in;
+        unsigned su, sx[3] = { 0, 0, 0 }, sy = 0;
+        if (in_q16 != 65536) {                     /* the input level (1.4): the model's input, both processors' share;
+                                                    * bypass still plays the untouched input */
+            int32_t g = in_q16;
+            for (i = 0; i < GP5_BLOCK; i++) {
+                int64_t v = ((int64_t)in[i] * g) >> 16;
+                ui[i] = v > 0x7FFFFFFF ? 0x7FFFFFFF : v < -0x7FFFFFFF ? -0x7FFFFFFF : (int32_t)v;
+            }
+            u = ui;
+        }
+        su = p24_shift(u, GP5_BLOCK, 0, 1);
+        p24_pack(u, GP5_BLOCK, &su, 1, &lo[LW_U]);
         lo[LW_DVALID] = 0;
         if (have_crc && slow < 50u) {
-            a2r_run(&a2, in, 0, xs, ys, 0);
+            a2r_run(&a2, u, 0, xs, ys, 0);
             for (i = 0; i < 3; i++) sx[i] = p24_shift(xs, GP5_BLOCK * 3, (int)i, 3);
             sy = p24_shift(ys, GP5_BLOCK, 0, 1);
             p24_pack(xs, GP5_BLOCK * 3, sx, 3, &lo[LW_X]);

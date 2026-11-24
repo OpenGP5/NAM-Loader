@@ -53,35 +53,48 @@ static unsigned ticks, browsing, browse_until, loading_until, show_empty_until;
 static int cursor;
 
 /* ---- each tone's gate, EQ and IR: [0..29] the slots, [30] the built-in capture; a setting belongs to a checksum ---- */
-typedef struct { uint32_t crc; uint8_t v[4]; uint8_t ir, pad[3]; } tone_rec_t;   /* gate, bass, mid, treble (tone.h's
+/* lv: the output and input levels (1.4) as steps from their 0 dB (int8; 0 in a record saved before 1.4) */
+#define TN 6u                                        /* a tone's settings: gate, bass, mid, treble, output, input */
+#define LV_OUT0 24u
+#define LV_IN0 24u
+typedef struct { uint32_t crc; uint8_t v[4]; uint8_t ir; int8_t lv[2]; uint8_t pad; } tone_rec_t;   /* gate, bass, mid, treble (tone.h's
                                                      ranges); ir: 0 the default (below), 1 none, 2.. IR 1.. */
 typedef struct { uint32_t crc; uint8_t v[4]; } tone_rec12_t;    /* before 1.3: 12 slots + the built-in one */
 static tone_rec_t trec[NAM_SLOTS + 1];
-static const uint8_t tmax[4] = { NAM_GATE_MAX, NAM_EQ_MAX, NAM_EQ_MAX, NAM_EQ_MAX };
+static const uint8_t tmax[TN] = { NAM_GATE_MAX, NAM_EQ_MAX, NAM_EQ_MAX, NAM_EQ_MAX, 48, 36 };
+static const uint8_t tdef[TN] = { 0, NAM_EQ_FLAT, NAM_EQ_FLAT, NAM_EQ_FLAT, LV_OUT0, LV_IN0 };
+static const uint8_t tid[TN] = { GP5_P_GATE, GP5_P_BASS, GP5_P_MID, GP5_P_TREBLE, GP5_P_OUTPUT, GP5_P_INPUT };
+static const uint8_t trow[TN] = { 5, 0, 1, 2, 3, 4 };   /* the TONE page's rows, in signal order: input .. output */
 static unsigned save_due, editing, edit_row, adjusting, edit_until;
 static unsigned page;                                /* 0 NAM, 1 CAB */
 static unsigned blist;                               /* the list being browsed: 0 captures, 1 IRs (row 0 NONE) */
 static uint32_t tone_key = 1;                        /* the capture whose settings are applied (1: none yet) */
 
 static unsigned tidx(void) { int c = nam_current(); return c < 0 ? NAM_SLOTS : (unsigned)c; }
-static void tone_get(uint8_t v[4])
+static void tone_get(uint8_t v[TN])
 {
     tone_rec_t *t = &trec[tidx()];
-    if (t->crc == nam_current_crc() && t->crc) { v[0] = t->v[0]; v[1] = t->v[1]; v[2] = t->v[2]; v[3] = t->v[3]; }
-    else { v[0] = 0; v[1] = v[2] = v[3] = NAM_EQ_FLAT; }
+    unsigned i;
+    if (t->crc == nam_current_crc() && t->crc) {
+        for (i = 0; i < 4; i++) v[i] = t->v[i];
+        v[4] = (uint8_t)((int)LV_OUT0 + t->lv[0]); v[5] = (uint8_t)((int)LV_IN0 + t->lv[1]);
+        for (i = 0; i < TN; i++) if (v[i] > tmax[i]) v[i] = tdef[i];   /* (a record from elsewhere) */
+    } else for (i = 0; i < TN; i++) v[i] = tdef[i];
 }
-static void tone_params(const uint8_t v[4])        /* the parameters show the tone playing's values */
+static void tone_params(const uint8_t v[TN])       /* the parameters show the tone playing's values (INPUT reaches the DSP) */
 {
-    gp5_param_set(GP5_P_GATE, v[0]); gp5_param_set(GP5_P_BASS, v[1]); gp5_param_set(GP5_P_MID, v[2]); gp5_param_set(GP5_P_TREBLE, v[3]);
+    for (unsigned i = 0; i < TN; i++) gp5_param_set(tid[i], v[i]);
 }
-static void tone_apply(void) { uint8_t v[4]; tone_get(v); nam_tone(v[0], v[1], v[2], v[3]); tone_params(v); tone_key = nam_current_crc(); }
+static void tone_play(const uint8_t v[TN]) { nam_tone(v[0], v[1], v[2], v[3]); nam_out_level(v[4]); }
+static void tone_apply(void) { uint8_t v[TN]; tone_get(v); tone_play(v); tone_params(v); tone_key = nam_current_crc(); }
 static tone_rec_t *tone_own(void)                   /* the tone playing's record, started afresh for a new capture */
 {
     tone_rec_t *t = &trec[tidx()];
     if (t->crc != nam_current_crc() || !t->crc) {
-        uint8_t v[4];
+        uint8_t v[TN];
         tone_get(v);
         t->crc = nam_current_crc(); t->v[0] = v[0]; t->v[1] = v[1]; t->v[2] = v[2]; t->v[3] = v[3]; t->ir = 0;
+        t->lv[0] = (int8_t)((int)v[4] - (int)LV_OUT0); t->lv[1] = (int8_t)((int)v[5] - (int)LV_IN0); t->pad = 0;
     }
     return t;
 }
@@ -103,12 +116,13 @@ static void ir_choose(int i)                         /* -1: none */
 }
 static void tone_change(unsigned k, unsigned value)  /* one setting of the tone playing */
 {
-    uint8_t v[4];
+    uint8_t v[TN];
     tone_rec_t *t = tone_own();
-    v[0] = t->v[0]; v[1] = t->v[1]; v[2] = t->v[2]; v[3] = t->v[3];
+    tone_get(v);
     v[k] = (uint8_t)(value > tmax[k] ? tmax[k] : value);
     for (unsigned i = 0; i < 4; i++) t->v[i] = v[i];
-    nam_tone(v[0], v[1], v[2], v[3]);
+    t->lv[0] = (int8_t)((int)v[4] - (int)LV_OUT0); t->lv[1] = (int8_t)((int)v[5] - (int)LV_IN0);
+    tone_play(v);
     tone_params(v);
     save_soon();
 }
@@ -117,7 +131,7 @@ static void tone_load(void)
     static tone_rec12_t old[13];
     unsigned i, n = gp5_store_load(STORE_TONE, trec, sizeof trec);
     if (n == sizeof trec) { tone_key = 1; return; }  /* applied on the next tick */
-    for (i = 0; i <= NAM_SLOTS; i++) { trec[i].crc = 0; trec[i].ir = 0; }
+    for (i = 0; i <= NAM_SLOTS; i++) { trec[i].crc = 0; trec[i].ir = 0; trec[i].lv[0] = trec[i].lv[1] = 0; trec[i].pad = 0; }
     if (n == sizeof old && gp5_store_load(STORE_TONE, old, sizeof old) == sizeof old)   /* saved by 1.2: kept */
         for (i = 0; i < 13; i++) {
             tone_rec_t *t = &trec[i < 12 ? i : NAM_SLOTS];
@@ -154,12 +168,24 @@ void fw_param_changed(unsigned id)
     if (id == GP5_P_CAB) nam_cab(gp5_param(GP5_P_CAB) != 0);
     if (id == GP5_P_TAPS) nam_cab_limit((unsigned)gp5_param(GP5_P_TAPS));
     if (id >= GP5_P_GATE && id <= GP5_P_TREBLE) tone_change(id - GP5_P_GATE, (unsigned)gp5_param(id));
+    if (id == GP5_P_OUTPUT) tone_change(4, (unsigned)gp5_param(id));
+    if (id == GP5_P_INPUT) tone_change(5, (unsigned)gp5_param(id));
     if (id == GP5_P_IR) ir_choose((int)gp5_param(GP5_P_IR) - 1);
     if (id == GP5_P_SLOT) {                          /* switch, as a push in the bank does (an empty slot: no change) */
         int s = (int)gp5_param(GP5_P_SLOT) - 1;
         if (s < 0 || nam_slot_ok(s)) { choose(s); browsing = 0; }
         gp5_param_set(GP5_P_SLOT, nam_current() + 1);   /* (until the switch is done: the one playing) */
     }
+}
+/* steps of 0.5 dB -> "-3.5 dB", "+12 dB", "0 dB" */
+static void half_db(char *t, int steps)
+{
+    unsigned n = 0, a = (unsigned)(steps < 0 ? -steps : steps), w = a / 2u;
+    if (steps) t[n++] = steps < 0 ? '-' : '+';
+    if (w >= 10u) t[n++] = (char)('0' + w / 10u);
+    t[n++] = (char)('0' + w % 10u);
+    if (a & 1u) { t[n++] = '.'; t[n++] = '5'; }
+    t[n++] = ' '; t[n++] = 'd'; t[n++] = 'B'; t[n] = 0;
 }
 int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB", "all", "512 taps" */
 {
@@ -179,6 +205,7 @@ int fw_param_text(unsigned id, int32_t v, char *t)  /* "Off", "-55 dB", "+3 dB",
         for (n = 0; n < 15 && s[n]; n++) t[n] = s[n];
         t[n] = 0; return 1;
     }
+    if (id == GP5_P_OUTPUT || id == GP5_P_INPUT) { half_db(t, (int)v - (int)(id == GP5_P_OUTPUT ? LV_OUT0 : LV_IN0)); return 1; }
     if (id == GP5_P_GATE && !v) { t[0] = 'O'; t[1] = 'f'; t[2] = 'f'; t[3] = 0; return 1; }
     if (id < GP5_P_GATE || id > GP5_P_TREBLE) return 0;
     d = id == GP5_P_GATE ? -(91 - (int)v) : (int)v - (int)NAM_EQ_FLAT;
@@ -216,11 +243,12 @@ void fw_para_turn(int detents)
     if (editing) {
         edit_until = ticks + EDIT_TICKS;
         if (adjusting) {
-            uint8_t v[4]; int x;
+            uint8_t v[TN]; int x;
+            unsigned k = trow[edit_row];
             tone_get(v);
-            x = (int)v[edit_row] + detents;
-            tone_change(edit_row, x < 0 ? 0u : (unsigned)x);
-        } else edit_row = (unsigned)(((int)edit_row + detents) % 4 + 4) % 4;
+            x = (int)v[k] + detents;
+            tone_change(k, x < 0 ? 0u : (unsigned)x);
+        } else edit_row = (unsigned)(((int)edit_row + detents) % (int)TN + (int)TN) % TN;
         return;
     }
     if (!browsing) { page = (unsigned)(((int)page + detents) % 2 + 2) % 2; return; }   /* NAM <-> CAB */
@@ -393,18 +421,21 @@ static int bank_row(void)                            /* the next row of the fram
 #define TROW_H 16
 static void tone_text(char *b, unsigned k, unsigned v)   /* "OFF", "-55 dB", "+3 dB", "0 dB" */
 {
+    if (k >= 4u) { half_db(b, (int)v - (int)(k == 4u ? LV_OUT0 : LV_IN0)); return; }
     int d = k == 0 ? -(91 - (int)v) : (int)v - (int)NAM_EQ_FLAT, a = d < 0 ? -d : d, n = 0;
     if (k == 0 && v == 0) { b[0] = 'O'; b[1] = 'F'; b[2] = 'F'; b[3] = 0; return; }
     if (d) b[n++] = d < 0 ? '-' : '+';
     if (a >= 10) b[n++] = (char)('0' + a / 10);
     b[n++] = (char)('0' + a % 10); b[n++] = ' '; b[n++] = 'd'; b[n++] = 'B'; b[n] = 0;
 }
-static void draw_tone_row(unsigned k, const uint8_t v[4])
+static unsigned tone_top(void) { return edit_row < 4u ? 0u : edit_row - 3u; }   /* the first row shown (4 fit) */
+static void draw_tone_row(unsigned row, const uint8_t v[TN])
 {
-    static const char *const lab[4] = { "GATE", "BASS", "MID", "TREBLE" };
+    static const char *const lab[TN] = { "GATE", "BASS", "MID", "TREBLE", "OUTPUT", "INPUT" };
+    unsigned k = trow[row];
     char val[12], show[16];
     const gp5_font_t *f = &gp5_font_sans_12;
-    int sel = k == edit_row, adj = sel && adjusting, i = 0, j = 0;
+    int sel = row == edit_row, adj = sel && adjusting, i = 0, j = 0;
     rgb_t fg = sel && !adj ? ONYEL : adj ? YELLOW : DIM, fv = sel && !adj ? ONYEL : adj ? YELLOW : INK;
     tone_text(val, k, v[k]);
     if (adj) show[i++] = '<', show[i++] = ' ';
@@ -415,7 +446,7 @@ static void draw_tone_row(unsigned k, const uint8_t v[4])
     if (adj) { box(0, 0, 3, TROW_H, YELLOW); }
     text(MARGIN, 12, f, lab[k], fg);
     text(W - MARGIN - gp5_text_width(f, show), 12, f, show, fv);
-    gp5_blit(0, HEAD_H + (int)k * TROW_H, W, TROW_H, band);
+    gp5_blit(0, HEAD_H + (int)(row - tone_top()) * TROW_H, W, TROW_H, band);
 }
 
 int fw_draw(int force)
@@ -437,14 +468,16 @@ int fw_draw(int force)
     }
     if (mode == 4) {                                 /* the TONE page: a changed row redrawn per pass */
         static unsigned sh_adj = 99, next;
-        uint8_t v[4]; uint32_t key; unsigned k;
+        uint8_t v[TN]; uint32_t key; unsigned k;
         tone_get(v);
-        key = (uint32_t)v[0] | (uint32_t)v[1] << 8 | (uint32_t)v[2] << 16 | (uint32_t)v[3] << 24;
+        key = 2166136261u;
+        for (k = 0; k < TN; k++) key = (key ^ v[k]) * 16777619u;
+        key ^= tone_top() << 28;
         if (key != sh_tone || adjusting != sh_adj || edit_row != sh_cursor) {
             if (adjusting != sh_adj) { sh_adj = adjusting; draw_head(4); return 0; }   /* its hint */
             sh_tone = key; sh_cursor = edit_row; next = 0;
         }
-        for (k = next; k < 4; k++) { draw_tone_row(k, v); next = k + 1; return 0; }
+        for (k = next; k < 4; k++) { draw_tone_row(tone_top() + k, v); next = k + 1; return 0; }
         return 0;
     }
     if (mode == 3) {

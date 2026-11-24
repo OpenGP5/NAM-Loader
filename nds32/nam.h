@@ -23,7 +23,8 @@ int nam_cab_is_on(void);
 void nam_cab_limit(unsigned taps);     /* at most this many taps of the IR file, 0 = all (live setting 1) */
 unsigned nam_cab_get_limit(void);
 unsigned nam_cab_len(void);            /* taps in use, 0 = no IR file */
-void nam_tone(uint8_t gate, uint8_t bass, uint8_t mid, uint8_t treble);   /* the gate and EQ (../tone.h), main loop */
+void nam_tone(uint8_t gate, uint8_t bass, uint8_t mid, uint8_t treble);
+void nam_out_level(uint8_t v);         /* the output level after the EQ: 0..48 = -12..+12 dB in 0.5 dB steps (1.4), main loop */   /* the gate and EQ (../tone.h), main loop */
 #define NAM_GATE_MAX 61u                /* gate: 0 off, 1..61 = -90..-30 dBFS (tone.h) */
 #define NAM_EQ_MAX 24u                  /* bass / mid / treble: 0..24 = -12..+12 dB */
 #define NAM_EQ_FLAT 12u
