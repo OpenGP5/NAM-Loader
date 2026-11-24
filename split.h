@@ -24,7 +24,11 @@
  * The capture (a2r_blob.h file) is in a slot of the bank (the control processor's storage files "tone-NN"), or the
  * built-in default. The DSP gets its own copy over the link: while the checksum it reports is not the control
  * processor's, the control processor sends the file instead of audio: [0] MAGIC_W, [1] word offset, [2] word count
- * (<= LW_W_MAX), [3] words in all, [4] checksum, [5..] the words. */
+ * (<= LW_W_MAX), [3] words in all, [4] checksum, [5..] the words.
+ *
+ * USB audio (OpenGP5 1.0, firmware.json "usb_audio": {"record_from": "control"}): the platform's playback words are
+ * 200..263 towards the DSP (so ours stay below 200: the capture goes in pieces of 192), and nothing comes back for
+ * it; on_block hands the finished output to gp5_usb_audio_record(). */
 #ifndef NAM_A2SPLIT_H
 #define NAM_A2SPLIT_H
 #define A2_SPLIT   5             /* first layer on the control processor (layers 0..4 on the DSP: 5 of 23; one more since the IR, 2026-11-16) */
@@ -50,7 +54,7 @@
 #define LW_GAIN    70
 #define LW_CAB     71            /* [71] IR cycles, [72] forward FFT, [73] products, [74] inverse FFT, [75] taps | on << 16 | auto-off << 17 */
 #define LW_W_DATA  5
-#define LW_W_MAX   256
+#define LW_W_MAX   192           /* 5 + 192 < 200: USB audio's playback words are 200..263 (OpenGP5 1.0) */
 
 /* The capture bank: NAM_SLOTS storage files "tone-01".. (2 sectors each: a capture is kept exactly as converted),
  * and NAM_IRS cab IRs "cab-01".. (1 sector each in the 16-bit format), chosen per capture (1.3; before: 12 slots,
