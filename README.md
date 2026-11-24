@@ -3,7 +3,7 @@
 <p align="center"><b>Neural Amp Modeler captures on the Valeton GP-5, each with its own cab IR, noise gate and EQ.</b></p>
 
 <p align="center">
-  <a href="https://github.com/OpenGP5/NAM-Loader/releases/latest"><img alt="Version 1.3.1" src="https://img.shields.io/badge/version-1.3.1-3cc0c1?style=flat-square"></a>
+  <a href="https://github.com/OpenGP5/NAM-Loader/releases/latest"><img alt="Version 1.4.0" src="https://img.shields.io/badge/version-1.4.0-3cc0c1?style=flat-square"></a>
   <a href="https://github.com/OpenGP5/OpenGP5"><img alt="Built on OpenGP5 0.8.0-alpha" src="https://img.shields.io/badge/built%20on-OpenGP5%200.8.0--alpha-5b6b7b?style=flat-square"></a>
   <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/badge/licence-MIT-3ee8b5?style=flat-square"></a>
   <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-e8590c?style=flat-square">
@@ -77,6 +77,7 @@ demo capture.
 
 | Version | Changes |
 |---|---|
+| 1.4.0 | An input and an output level for each capture; IRs as loud as captures without one (Launchpad 0.4.0) |
 | 1.3.1 | Launchpad can switch the capture playing (*Play on the pedal*) |
 | 1.3.0 | 30 captures and 12 IRs, chosen independently; the NAM and CAB pages |
 | 1.2.0 | A noise gate and a 3-band EQ for each capture |
