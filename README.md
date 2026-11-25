@@ -77,7 +77,7 @@ demo capture.
 
 | Version | Changes |
 |---|---|
-| 1.4.0 | An input and an output level for each capture; IRs as loud as captures without one (Launchpad 0.4.0) |
+| 1.4.0 | On OpenGP5 1.0: USB audio (record and play through the pedal); an input and an output level for each capture; IRs as loud as captures without one (Launchpad 0.4.0) |
 | 1.3.1 | Launchpad can switch the capture playing (*Play on the pedal*) |
 | 1.3.0 | 30 captures and 12 IRs, chosen independently; the NAM and CAB pages |
 | 1.2.0 | A noise gate and a 3-band EQ for each capture |
