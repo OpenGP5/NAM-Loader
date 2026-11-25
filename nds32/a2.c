@@ -306,6 +306,15 @@ static void on_block(const int32_t *in, int32_t *out)
     out[LW_CAB + 3] = (int32_t)cab.cyc_inv;
     out[LW_CAB + 4] = (int32_t)(nam_cab_taps | (cab_on & 1u) << 16 | (cab_auto_off & 1u) << 17);
     out[0] = (int32_t)MAGIC_N;
+#ifdef GP5_USB_RECORD_CONTROL
+    {   /* USB audio: what the DSP will play (mono to both sides): the output with the fade's gain, or the dry input in
+         * bypass. (Blocks that return early above are recorded as silence by the platform.) */
+        static int32_t rec[A2R_BLOCK];
+        if (nam_bypass & 1u) for (i = 0; i < A2R_BLOCK; i++) rec[i] = uu[i];
+        else for (i = 0; i < A2R_BLOCK; i++) rec[i] = gain >= UNITY ? out[LW_Y + i] : (int32_t)(((int64_t)out[LW_Y + i] * gain) >> 16);
+        gp5_usb_audio_record(rec, rec);
+    }
+#endif
     nam_dsp_cycles = (uint32_t)in[LW_DSPCYC];
     nam_cycles = __nds32__mfsr(NDS32_SR_PFMC0) - t0;
     if (nam_blocks > 100 && nam_cycles > nam_worst) nam_worst = nam_cycles;

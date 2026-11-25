@@ -12,6 +12,7 @@
     "link_words": 264,
     "link_early": true
   },
+  "usb_audio": { "record_from": "control" },
   "control": {
     "mhz": 320
   }
