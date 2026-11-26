@@ -4,9 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/OpenGP5/NAM-Loader/releases/latest"><img alt="Version 1.4.0" src="https://img.shields.io/badge/version-1.4.0-3cc0c1?style=flat-square"></a>
-  <a href="https://github.com/OpenGP5/OpenGP5"><img alt="Built on OpenGP5 0.8.0-alpha" src="https://img.shields.io/badge/built%20on-OpenGP5%200.8.0--alpha-5b6b7b?style=flat-square"></a>
+  <a href="https://github.com/OpenGP5/OpenGP5"><img alt="Built on OpenGP5 1.0.0" src="https://img.shields.io/badge/built%20on-OpenGP5%201.0.0-5b6b7b?style=flat-square"></a>
   <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/badge/licence-MIT-3ee8b5?style=flat-square"></a>
-  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-e8590c?style=flat-square">
 </p>
 
 <p align="center">
@@ -26,7 +25,7 @@ The pedal runs the capture's own network, every layer and every weight, unchange
 point to run it in real time. The result is about 65 dB from NAM's own floating-point output on guitar.
 
 > [!NOTE]
-> **Alpha.** Flashing custom firmware can go wrong. Read
+> **Before you flash.** Flashing custom firmware can go wrong. Read
 > [Before you flash](https://opengp5.github.io/docs/get-started/safety/) first. Installing NAM Loader over another
 > firmware wipes that firmware's presets and files: back them up first.
 
@@ -128,7 +127,7 @@ The model is split across both of the pedal's processors: the DSP runs the first
 | `default_capture.inc` | The built-in capture (see `CAPTURE-LICENSE.txt`) |
 | `tools/a2r_export.py` | Converts a `.nam` file into a capture file, with Calibrate and Normalize (`--no-calibration`, `--no-level`); needs numpy and soundfile |
 | `tools/make_cab.py` | Converts a `.wav` IR into a cab file (the older float format, which the pedal still plays); needs numpy, soundfile and scipy |
-| `opengp5/` | The platform, a git submodule pinned to a tested release (0.8.0-alpha) |
+| `opengp5/` | The platform, a git submodule pinned to a tested release (1.0.0) |
 
 ## Licence
 
